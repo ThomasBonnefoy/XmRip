@@ -15,12 +15,17 @@ import android.os.Bundle
 import android.os.ParcelUuid
 import android.view.Gravity
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import com.xmrip.app.bt.HeadphoneClient
+import com.xmrip.app.bt.LastDevice
 import com.xmrip.app.protocol.BatteryReport
+import com.xmrip.app.protocol.MdrConstants
+import com.xmrip.app.protocol.MdrSession
 import java.util.Locale
 
 class MainActivity : Activity() {
@@ -28,18 +33,32 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_BLUETOOTH_CONNECT = 1001
         private const val UUID_SCAN_TIMEOUT_MS = 4_000L
+        private const val ACTION_SET_NC_ASM = "com.xmrip.app.action.SET_NC_ASM"
+        private const val EXTRA_NC_ASM_MODE = "com.xmrip.app.extra.NC_ASM_MODE"
     }
 
     private lateinit var statusText: TextView
     private lateinit var batteryBig: TextView
     private lateinit var detailText: TextView
+    private lateinit var ncButton: Button
+    private lateinit var ambButton: Button
+    private lateinit var offButton: Button
+    private lateinit var ambientSeekBar: SeekBar
+    private lateinit var ambientLevelText: TextView
+    private lateinit var autoAmbientCheck: CheckBox
     private lateinit var deviceList: ListView
     private lateinit var refreshButton: Button
+
+    private var ncAsmState: com.xmrip.app.protocol.NcAsmState? = null
+    private var lastAmbientLevel: Int = MdrConstants.AMBIENT_LEVEL_DEFAULT
+    private var suppressSeekBar = false
+    private var suppressAutoCheck = false
 
     private val adapter: BluetoothAdapter?
         get() = (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
     private var selectedDevice: BluetoothDevice? = null
+    private var requestedMode: Int? = null
     private var busy = false
 
     private val pendingDevices = mutableListOf<BluetoothDevice>()
@@ -64,6 +83,31 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
+        requestedMode = parseModeFromIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val mode = parseModeFromIntent(intent)
+        if (mode != null) {
+            requestedMode = mode
+            val device = selectedDevice
+            if (device != null && !busy) {
+                setNcAsmMode(device, mode)
+            } else {
+                listDevices()
+            }
+        }
+    }
+
+    private fun parseModeFromIntent(intent: Intent?): Int? {
+        if (intent?.action != ACTION_SET_NC_ASM) return null
+        return when (intent.getStringExtra(EXTRA_NC_ASM_MODE)) {
+            "noise_cancelling" -> MdrSession.MODE_NC
+            "ambient" -> MdrSession.MODE_AMBIENT
+            "off" -> MdrSession.MODE_OFF
+            else -> null
+        }
     }
 
     override fun onResume() {
@@ -111,6 +155,87 @@ class MainActivity : Activity() {
         }
         root.addView(detailText)
 
+        val ncRow = LinearLayout(this)
+        ncRow.orientation = LinearLayout.HORIZONTAL
+        val btnLp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        btnLp.topMargin = (12 * resources.displayMetrics.density).toInt()
+        ncButton = Button(this).apply { text = "Réduction de bruit" }
+        ambButton = Button(this).apply { text = "Son ambiant" }
+        offButton = Button(this).apply { text = "Désactivé" }
+        listOf(ncButton, ambButton, offButton).forEach {
+            it.isEnabled = false
+            ncRow.addView(it, btnLp)
+        }
+        root.addView(ncRow)
+        ncButton.setOnClickListener { selectedDevice?.let { setNcAsmMode(it, MdrSession.MODE_NC) } }
+        ambButton.setOnClickListener { selectedDevice?.let { setNcAsmMode(it, MdrSession.MODE_AMBIENT) } }
+        offButton.setOnClickListener { selectedDevice?.let { setNcAsmMode(it, MdrSession.MODE_OFF) } }
+
+        val ambientControls = LinearLayout(this)
+        ambientControls.orientation = LinearLayout.VERTICAL
+
+        val ambLevelRow = LinearLayout(this)
+        ambLevelRow.orientation = LinearLayout.HORIZONTAL
+        ambLevelRow.gravity = Gravity.CENTER_VERTICAL
+        ambientLevelText = TextView(this).apply {
+            textSize = 13f
+            text = "Niveau ambiant : ${MdrConstants.AMBIENT_LEVEL_DEFAULT}"
+        }
+        val lpTxt = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+        ambientLevelText.layoutParams = lpTxt
+        ambientSeekBar = SeekBar(this)
+        ambientSeekBar.max = MdrConstants.AMBIENT_LEVEL_MAX - 1
+        ambientSeekBar.progress = MdrConstants.AMBIENT_LEVEL_DEFAULT - 1
+        val lpSb = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        lpSb.leftMargin = (10 * resources.displayMetrics.density).toInt()
+        ambientSeekBar.layoutParams = lpSb
+        ambLevelRow.addView(ambientLevelText)
+        ambLevelRow.addView(ambientSeekBar)
+        ambientControls.addView(ambLevelRow)
+
+        autoAmbientCheck = CheckBox(this).apply {
+            text = "Son ambiant automatique"
+            textSize = 14f
+        }
+        ambientControls.addView(autoAmbientCheck)
+
+        val lpAmbient = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+        lpAmbient.topMargin = (12 * resources.displayMetrics.density).toInt()
+        ambientControls.layoutParams = lpAmbient
+        root.addView(ambientControls)
+
+        ambientSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (!suppressSeekBar) ambientLevelText.text = "Niveau ambiant : ${progress + 1}"
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                if (suppressSeekBar) return
+                val level = seekBar?.progress?.plus(1) ?: return
+                selectedDevice?.let { setAmbientLevel(it, level) }
+            }
+        })
+
+        autoAmbientCheck.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressAutoCheck) return@setOnCheckedChangeListener
+            val device = selectedDevice
+            if (device != null && ncAsmState?.enabled == true && ncAsmState?.mode == MdrConstants.NCASM_MODE_ASM) {
+                setAutoAmbient(device, isChecked)
+            } else {
+                suppressAutoCheck = true
+                autoAmbientCheck.isChecked = ncAsmState?.autoEnabled == true
+                suppressAutoCheck = false
+            }
+        }
+
         deviceList = ListView(this)
         val lpList = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -142,6 +267,7 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val report = HeadphoneClient.connectAndReadBattery(device)
+                LastDevice.save(this, device)
                 runOnUiThread {
                     busy = false
                     showBattery(device.name ?: "Casque", report)
@@ -161,6 +287,7 @@ class MainActivity : Activity() {
         val modelLine = report.modelName?.let { "Modèle : $it" }
         detailText.text = listOfNotNull(
             "$deviceLabel — batterie ${report.levelPercent}% (${report.chargingLabel})",
+            report.ncAsm?.let { "Mode : ${it.label}" },
             modelLine,
             report.firmwareVersion?.let { "Firmware : $it" },
             report.modelName?.let {
@@ -168,7 +295,117 @@ class MainActivity : Activity() {
                 else "⚠️ Ce modèle n'est pas le WH-1000XM6 — support non garanti."
             },
         ).joinToString("\n")
+        updateNcAsmButtons(report)
         setStatus("Connecté à $deviceLabel")
+    }
+
+    private fun updateNcAsmButtons(report: BatteryReport) {
+        val nc = report.ncAsm
+        ncAsmState = nc
+        ncButton.isEnabled = nc != null
+        ambButton.isEnabled = nc != null
+        offButton.isEnabled = nc != null
+        val active = when {
+            nc != null && !nc.enabled -> MdrSession.MODE_OFF
+            nc != null && nc.mode == MdrConstants.NCASM_MODE_ASM -> MdrSession.MODE_AMBIENT
+            nc != null -> MdrSession.MODE_NC
+            else -> -1
+        }
+        ncButton.isSelected = active == MdrSession.MODE_NC
+        ambButton.isSelected = active == MdrSession.MODE_AMBIENT
+        offButton.isSelected = active == MdrSession.MODE_OFF
+
+        val ambientActive = nc != null && nc.enabled && nc.mode == MdrConstants.NCASM_MODE_ASM
+        val manualLevel = ambientActive && !nc.autoEnabled
+        if (manualLevel) lastAmbientLevel = nc.ambientLevel
+        ambientSeekBar.isEnabled = manualLevel
+        autoAmbientCheck.isEnabled = ambientActive
+        suppressSeekBar = true
+        if (manualLevel) {
+            ambientSeekBar.progress = (nc.ambientLevel - 1).coerceIn(0, MdrConstants.AMBIENT_LEVEL_MAX - 1)
+            ambientLevelText.text = "Niveau ambiant : ${nc.ambientLevel}"
+        }
+        suppressSeekBar = false
+        suppressAutoCheck = true
+        autoAmbientCheck.isChecked = nc?.autoEnabled == true
+        suppressAutoCheck = false
+    }
+
+    @Suppress("MissingPermission")
+    private fun setNcAsmMode(device: BluetoothDevice, mode: Int) {
+        if (busy) return
+        busy = true
+        setStatus("Application du mode…")
+        Thread {
+            try {
+                val autoEnabled = ncAsmState?.autoEnabled == true && mode == MdrSession.MODE_AMBIENT
+                val report = HeadphoneClient.connectAndSetNcAsm(
+                    device,
+                    mode,
+                    ambientLevel = if (mode == MdrSession.MODE_AMBIENT) lastAmbientLevel else MdrConstants.AMBIENT_LEVEL_DEFAULT,
+                    autoEnabled = autoEnabled,
+                )
+                LastDevice.save(this, device)
+                runOnUiThread {
+                    busy = false
+                    requestedMode = null
+                    showBattery(device.name ?: "Casque", report)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    busy = false
+                    setStatus("Échec : ${e.message ?: e.javaClass.simpleName}\n\n" +
+                        "Vérifie que Sound Connect est fermé (un seul contrôleur à la fois).")
+                }
+            }
+        }.start()
+    }
+
+    @Suppress("MissingPermission")
+    private fun setAmbientLevel(device: BluetoothDevice, level: Int) {
+        if (busy) return
+        busy = true
+        setStatus("Réglage du niveau ambiant…")
+        Thread {
+            try {
+                val autoEnabled = ncAsmState?.autoEnabled == true
+                val report = HeadphoneClient.connectAndSetAmbientLevel(device, level, autoEnabled)
+                LastDevice.save(this, device)
+                runOnUiThread {
+                    busy = false
+                    showBattery(device.name ?: "Casque", report)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    busy = false
+                    setStatus("Échec : ${e.message ?: e.javaClass.simpleName}\n\n" +
+                        "Vérifie que Sound Connect est fermé (un seul contrôleur à la fois).")
+                }
+            }
+        }.start()
+    }
+
+    @Suppress("MissingPermission")
+    private fun setAutoAmbient(device: BluetoothDevice, enabled: Boolean) {
+        if (busy) return
+        busy = true
+        setStatus(if (enabled) "Activation du son ambiant automatique…" else "Désactivation du son ambiant automatique…")
+        Thread {
+            try {
+                val report = HeadphoneClient.connectAndSetAutoAmbient(device, enabled, lastAmbientLevel)
+                LastDevice.save(this, device)
+                runOnUiThread {
+                    busy = false
+                    showBattery(device.name ?: "Casque", report)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    busy = false
+                    setStatus("Échec : ${e.message ?: e.javaClass.simpleName}\n\n" +
+                        "Vérifie que Sound Connect est fermé (un seul contrôleur à la fois).")
+                }
+            }
+        }.start()
     }
 
     private fun requestPermissionIfNeeded() {
@@ -280,8 +517,14 @@ class MainActivity : Activity() {
         refreshButton.isEnabled = true
         batteryBig.text = "—"
         detailText.text = ""
-        setStatus("Connexion automatique à ${device.name}…")
-        refreshBattery()
+        val mode = requestedMode
+        if (mode != null) {
+            setStatus("Connexion à ${device.name} et application du mode…")
+            setNcAsmMode(device, mode)
+        } else {
+            setStatus("Connexion automatique à ${device.name}…")
+            refreshBattery()
+        }
     }
 
     private fun setStatus(msg: String) {

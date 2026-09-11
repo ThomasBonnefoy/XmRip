@@ -34,6 +34,39 @@ object MdrConstants {
     const val CMD_POWER_RET_STATUS = 0x23
     const val CMD_POWER_NTFY_STATUS = 0x25
 
+    const val CMD_NCASM_GET_PARAM = 0x66
+    const val CMD_NCASM_RET_PARAM = 0x67
+    const val CMD_NCASM_SET_PARAM = 0x68
+    const val CMD_NCASM_NTFY_PARAM = 0x69
+
+    /** NcAsmInquiredType. */
+    const val NCASM_TYPE_DUAL_NC_ASM = 0x17
+    const val NCASM_TYPE_DUAL_NC_ASM_NA = 0x19 // XM6 : gestion auto du son ambiant
+    const val NCASM_TYPE_ASM_SEAMLESS = 0x22
+
+    /** NcAsmOnOffValue. */
+    const val NCASM_VALUE_OFF = 0
+    const val NCASM_VALUE_ON = 1
+
+    /** NcAsmMode. */
+    const val NCASM_MODE_NC = 0
+    const val NCASM_MODE_ASM = 1
+
+    /** AmbientSoundMode. */
+    const val NCASM_AMBIENT_NORMAL = 0
+    const val NCASM_AMBIENT_VOICE = 1
+
+    /** NoiseAdaptiveSensitivity (XM6 auto ambient). */
+    const val NCASM_NOISE_ADAPTIVE_STANDARD = 0
+    const val NCASM_NOISE_ADAPTIVE_HIGH = 1
+    const val NCASM_NOISE_ADAPTIVE_LOW = 2
+
+    /** ValueChangeStatus. */
+    const val NCASM_STATUS_CHANGED = 1
+
+    const val AMBIENT_LEVEL_MAX = 20
+    const val AMBIENT_LEVEL_DEFAULT = 20
+
     /** DeviceInfoType. */
     const val DEVICE_INFO_MODEL_NAME = 0x01
     const val DEVICE_INFO_FW_VERSION = 0x02

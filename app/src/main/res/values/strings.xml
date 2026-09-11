@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">XmRip</string>
+    <string name="shortcut_mc_short">Réduction de bruit</string>
+    <string name="shortcut_mc_long">Activer la réduction de bruit</string>
+    <string name="shortcut_ambient_short">Son ambiant</string>
+    <string name="shortcut_ambient_long">Activer le son ambiant</string>
+    <string name="shortcut_off_short">Désactivé</string>
+    <string name="shortcut_off_long">Désactiver la réduction de bruit</string>
 </resources>
