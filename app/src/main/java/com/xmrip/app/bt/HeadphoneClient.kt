@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
 import com.xmrip.app.protocol.MdrConstants
 import com.xmrip.app.protocol.MdrSession
+import com.xmrip.app.protocol.MdrProtocolException
 import com.xmrip.app.protocol.BatteryReport
 import java.util.UUID
 
@@ -39,6 +40,19 @@ object HeadphoneClient {
 
     @Suppress("MissingPermission")
     fun connectAndReadBattery(device: BluetoothDevice): BatteryReport {
+        var lastError: Exception? = null
+        repeat(2) {
+            try {
+                return attempt(device)
+            } catch (e: Exception) {
+                lastError = e
+                Thread.sleep(1_000)
+            }
+        }
+        throw lastError ?: MdrProtocolException("Connexion impossible")
+    }
+
+    private fun attempt(device: BluetoothDevice): BatteryReport {
         var socket: BluetoothSocket? = null
         try {
             socket = device.createInsecureRfcommSocketToServiceRecord(SERVICE_UUID)
