@@ -5,10 +5,14 @@ import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelUuid
 import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
@@ -23,6 +27,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_BLUETOOTH_CONNECT = 1001
+        private const val UUID_SCAN_TIMEOUT_MS = 4_000L
     }
 
     private lateinit var statusText: TextView
@@ -37,6 +42,25 @@ class MainActivity : Activity() {
     private var selectedDevice: BluetoothDevice? = null
     private var busy = false
 
+    private val pendingDevices = mutableListOf<BluetoothDevice>()
+    private val discoveredUuids = HashMap<String, List<ParcelUuid>>()
+    private val uuidScanRunnable = Runnable { finishUuidScan() }
+
+    private val uuidReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothDevice.ACTION_UUID) return
+            val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+            val rawUuids = intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID)
+            val uuids = rawUuids?.filterIsInstance<ParcelUuid>() ?: return
+            discoveredUuids[device.address] = uuids
+            if (pendingDevices.isNotEmpty() &&
+                pendingDevices.all { discoveredUuids.containsKey(it.address) }
+            ) {
+                finishUuidScan()
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
@@ -44,7 +68,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        registerReceiver(uuidReceiver, IntentFilter(BluetoothDevice.ACTION_UUID))
         requestPermissionIfNeeded()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        runOnUiThread { deviceList.removeCallbacks(uuidScanRunnable) }
+        runCatching { unregisterReceiver(uuidReceiver) }
     }
 
     private fun buildUi() {
@@ -91,15 +122,18 @@ class MainActivity : Activity() {
 
         refreshButton = Button(this).apply {
             text = "Actualiser"
-            isEnabled = false
+            isEnabled = true
         }
         root.addView(refreshButton)
-        refreshButton.setOnClickListener { refreshBattery() }
+        refreshButton.setOnClickListener {
+            if (selectedDevice != null) refreshBattery() else listDevices()
+        }
 
         setContentView(root)
         setStatus("Recherche du casque…")
     }
 
+    @Suppress("MissingPermission")
     private fun refreshBattery() {
         val device = selectedDevice ?: return
         if (busy) return
@@ -124,11 +158,16 @@ class MainActivity : Activity() {
 
     private fun showBattery(deviceLabel: String, report: BatteryReport) {
         batteryBig.text = "${report.levelPercent}%"
-        detailText.text = "$deviceLabel — batterie ${report.levelPercent}% (${report.chargingLabel})\n" +
-            buildString {
-                report.modelName?.let { append("Modèle : $it\n") }
-                report.firmwareVersion?.let { append("Firmware : $it") }
-            }
+        val modelLine = report.modelName?.let { "Modèle : $it" }
+        detailText.text = listOfNotNull(
+            "$deviceLabel — batterie ${report.levelPercent}% (${report.chargingLabel})",
+            modelLine,
+            report.firmwareVersion?.let { "Firmware : $it" },
+            report.modelName?.let {
+                if (it.uppercase().contains("XM6")) null
+                else "⚠️ Ce modèle n'est pas le WH-1000XM6 — support non garanti."
+            },
+        ).joinToString("\n")
         setStatus("Connecté à $deviceLabel")
     }
 
@@ -166,22 +205,83 @@ class MainActivity : Activity() {
             setStatus("Aucun appareil appairé. Appaire ton casque dans les réglages Bluetooth.")
             return
         }
-        val candidates = HeadphoneClient.sortSonyFirst(bonded.filter { HeadphoneClient.isCandidate(it) })
-        if (candidates.isEmpty()) {
+        val pre = bonded.filter { HeadphoneClient.isCandidate(it) }
+        if (pre.isEmpty()) {
             setStatus("Aucun appareil Bluetooth classique trouvé.")
+            return
+        }
+
+        pendingDevices.clear()
+        pendingDevices.addAll(pre)
+        discoveredUuids.clear()
+        deviceList.adapter = null
+        batteryBig.text = ""
+        detailText.text = ""
+        setStatus("Détection des casques Sony…")
+        var needScan = false
+        for (device in pre) {
+            val cached = runCatching { device.uuids?.toList() }.getOrNull()
+            if (cached != null) {
+                discoveredUuids[device.address] = cached
+            } else {
+                needScan = true
+                runCatching { device.fetchUuidsWithSdp() }
+            }
+        }
+        if (needScan) {
+            finishUuidScan()
+        } else {
+            deviceList.postDelayed(uuidScanRunnable, UUID_SCAN_TIMEOUT_MS)
+        }
+    }
+
+    @Suppress("MissingPermission")
+    private fun finishUuidScan() {
+        deviceList.removeCallbacks(uuidScanRunnable)
+        val sony = pendingDevices.filter { device ->
+            discoveredUuids[device.address]
+                ?.any { it.uuid == HeadphoneClient.SERVICE_UUID } == true
+        }
+        if (sony.isEmpty()) {
+            listAllFallback()
+            return
+        }
+        showDeviceList(sony)
+    }
+
+    @Suppress("MissingPermission")
+    private fun listAllFallback() {
+        setStatus(
+            "Détection SDP sans résultat — liste des appareils appairés.\n" +
+                "Seul le WH-1000XM6 est pris en charge : la connexion le confirme.",
+        )
+        showDeviceList(pendingDevices)
+    }
+
+    @Suppress("MissingPermission")
+    private fun showDeviceList(devices: List<BluetoothDevice>) {
+        val candidates = HeadphoneClient.sortSonyFirst(devices)
+        if (candidates.size == 1) {
+            autoConnect(candidates[0])
             return
         }
         val names = candidates.map { "${it.name}\n${it.address.uppercase(Locale.ROOT)}" }
         deviceList.adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_list_item_2, android.R.id.text2, names)
         deviceList.setOnItemClickListener { _, _, position, _ ->
             val device = candidates[position]
-            selectedDevice = device
-            refreshButton.isEnabled = true
-            batteryBig.text = "—"
-            detailText.text = ""
-            refreshBattery()
+            autoConnect(device)
         }
         setStatus("Choisis ton casque :")
+    }
+
+    @Suppress("MissingPermission")
+    private fun autoConnect(device: BluetoothDevice) {
+        selectedDevice = device
+        refreshButton.isEnabled = true
+        batteryBig.text = "—"
+        detailText.text = ""
+        setStatus("Connexion automatique à ${device.name}…")
+        refreshBattery()
     }
 
     private fun setStatus(msg: String) {
