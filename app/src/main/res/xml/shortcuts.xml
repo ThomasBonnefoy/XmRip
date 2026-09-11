@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="mode_nc"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_mc_short"
+        android:shortcutLongLabel="@string/shortcut_mc_long">
+        <intent
+            android:action="com.xmrip.app.action.SET_NC_ASM"
+            android:targetPackage="com.xmrip.app"
+            android:targetClass="com.xmrip.app.NcAsmActionActivity">
+            <extra
+                android:name="com.xmrip.app.extra.NC_ASM_MODE"
+                android:value="noise_cancelling" />
+        </intent>
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="mode_ambient"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_ambient_short"
+        android:shortcutLongLabel="@string/shortcut_ambient_long">
+        <intent
+            android:action="com.xmrip.app.action.SET_NC_ASM"
+            android:targetPackage="com.xmrip.app"
+            android:targetClass="com.xmrip.app.NcAsmActionActivity">
+            <extra
+                android:name="com.xmrip.app.extra.NC_ASM_MODE"
+                android:value="ambient" />
+        </intent>
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="mode_off"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_off_short"
+        android:shortcutLongLabel="@string/shortcut_off_long">
+        <intent
+            android:action="com.xmrip.app.action.SET_NC_ASM"
+            android:targetPackage="com.xmrip.app"
+            android:targetClass="com.xmrip.app.NcAsmActionActivity">
+            <extra
+                android:name="com.xmrip.app.extra.NC_ASM_MODE"
+                android:value="off" />
+        </intent>
+    </shortcut>
+</shortcuts>
