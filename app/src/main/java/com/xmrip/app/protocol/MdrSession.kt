@@ -12,6 +12,7 @@ data class BatteryReport(
     val levelPercent: Int,
     val chargingStatus: Int,
     val ncAsm: NcAsmState? = null,
+    val musicVolume: Int? = null,
 ) {
     val chargingLabel: String
         get() = when (chargingStatus) {
@@ -110,7 +111,14 @@ class MdrSession(
             // Le casque peut ne pas répondre sur ce type NCASM ; on garde la batterie.
         }
 
-        battery = BatteryReport(modelName, firmwareVersion, level, charging, ncAsm)
+        var musicVolume: Int? = null
+        try {
+            musicVolume = readMusicVolume()
+        } catch (_: Exception) {
+            // Lecture du volume facultative.
+        }
+
+        battery = BatteryReport(modelName, firmwareVersion, level, charging, ncAsm, musicVolume)
         return battery
     }
 
@@ -196,6 +204,175 @@ class MdrSession(
         val deadline = System.currentTimeMillis() + MdrConstants.HANDSHAKE_TIMEOUT_MS
         quickHandshake(deadline)
         return setNcAsm(mode)
+    }
+
+    /** Règle le volume de lecture (0..30). Renvoie la valeur effectivement appliquée. */
+    fun setMusicVolume(volume: Int): Int {
+        val v = volume.coerceIn(0, MdrConstants.PLAY_VOLUME_MAX)
+        sendAndAwait(
+            byteArrayOf(
+                MdrConstants.CMD_PLAY_SET_PARAM.toByte(),
+                MdrConstants.PLAY_TYPE_MUSIC_VOLUME.toByte(),
+                v.toByte(),
+            ),
+            intArrayOf(MdrConstants.CMD_PLAY_RET_PARAM, MdrConstants.CMD_PLAY_NTFY_PARAM),
+            "réponse volume",
+        )
+        return v
+    }
+
+    /**
+     * Coupe/rétablit le son.
+     * Il n'existe pas de commande « mute » dédiée en v2 (MUSIC_VOLUME_WITH_MUTE
+     * n'existe qu'en Ret/Ntfy) : le mute passe par un volume à 0.
+     */
+    fun setMusicMute(muted: Boolean, volume: Int): Int {
+        return setMusicVolume(if (muted) 0 else volume)
+    }
+
+    /** Contrôle transport lecture/pause/piste (sans attendre de retour). */
+    fun playControl(control: Int) {
+        sendCommand(
+            byteArrayOf(
+                MdrConstants.CMD_PLAY_SET_STATUS.toByte(),
+                MdrConstants.PLAY_TYPE_PLAYBACK_CONTROL_WITH_CALL_VOLUME_ADJUSTMENT.toByte(),
+                MdrConstants.V2_ENABLE.toByte(),
+                control.toByte(),
+            ),
+        )
+    }
+
+    /** Règle le délai d'extinction automatique. */
+    fun setAutoPowerOff(element: Int) {
+        sendAndAwait(
+            byteArrayOf(
+                MdrConstants.CMD_POWER_SET_PARAM.toByte(),
+                MdrConstants.POWER_TYPE_AUTO_POWER_OFF.toByte(),
+                element.toByte(),
+                element.toByte(),
+            ),
+            intArrayOf(MdrConstants.CMD_POWER_RET_PARAM, MdrConstants.CMD_POWER_NTFY_PARAM),
+            "réponse extinction auto",
+        )
+    }
+
+    /** Active/désactive Speak-to-Chat (détection AUTO, réactivation rapide). */
+    fun setSpeakToChat(enabled: Boolean) {
+        sendAndAwait(
+            byteArrayOf(
+                MdrConstants.CMD_SYSTEM_SET_EXT_PARAM.toByte(),
+                MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2.toByte(),
+                MdrConstants.STC_DETECT_AUTO.toByte(),
+                MdrConstants.STC_OFF_TIME_FAST.toByte(),
+            ),
+            intArrayOf(MdrConstants.CMD_SYSTEM_RET_EXT_PARAM, MdrConstants.CMD_SYSTEM_NTFY_EXT_PARAM),
+            "réponse speak-to-chat ext",
+        )
+        sendAndAwait(
+            byteArrayOf(
+                MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
+                MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2.toByte(),
+                (if (enabled) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
+                MdrConstants.V2_VALUE_OFF.toByte(), // preview mode
+            ),
+            intArrayOf(MdrConstants.CMD_SYSTEM_RET_PARAM, MdrConstants.CMD_SYSTEM_NTFY_PARAM),
+            "réponse speak-to-chat",
+        )
+    }
+
+    /** Applique un preset d'égaliseur. */
+    fun setEqPreset(presetId: Int) {
+        sendAndAwait(
+            byteArrayOf(
+                MdrConstants.CMD_EQEBB_SET_PARAM.toByte(),
+                MdrConstants.EQEBB_TYPE_PRESET_EQ.toByte(),
+                presetId.toByte(),
+                0x00, // MDRPodArray<UInt8> bandSteps : count = 0
+            ),
+            intArrayOf(MdrConstants.CMD_EQEBB_RET_PARAM, MdrConstants.CMD_EQEBB_NTFY_PARAM),
+            "réponse égaliseur",
+        )
+    }
+
+    /** Active/désactive le DSEE (upscaling automatique). */
+    fun setDsee(enabled: Boolean) {
+        sendAndAwait(
+            byteArrayOf(
+                MdrConstants.CMD_AUDIO_SET_PARAM.toByte(),
+                MdrConstants.AUDIO_TYPE_UPSCALING.toByte(),
+                (if (enabled) MdrConstants.UPSCALING_AUTO else MdrConstants.UPSCALING_OFF).toByte(),
+            ),
+            intArrayOf(MdrConstants.CMD_AUDIO_RET_PARAM, MdrConstants.CMD_AUDIO_NTFY_PARAM),
+            "réponse DSEE",
+        )
+    }
+
+    /** Affecte les fonctions des panneaux tactiles gauche/droit. */
+    fun setAssignable(leftPreset: Int, rightPreset: Int) {
+        sendAndAwait(
+            byteArrayOf(
+                MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
+                MdrConstants.SYSTEM_TYPE_ASSIGNABLE_SETTINGS.toByte(),
+                0x02, // MDRPodArray<Preset> : count = 2
+                leftPreset.toByte(),
+                rightPreset.toByte(),
+            ),
+            intArrayOf(MdrConstants.CMD_SYSTEM_RET_PARAM, MdrConstants.CMD_SYSTEM_NTFY_PARAM),
+            "réponse boutons",
+        )
+    }
+
+    /**
+     * Envoie une commande SET puis attend une réponse RET/NTFY de la même famille.
+     * Les trames sans rapport sont acquittées et ignorées.
+     */
+    private fun sendAndAwait(payload: ByteArray, expected: IntArray, what: String) {
+        val deadline = System.currentTimeMillis() + MdrConstants.HANDSHAKE_TIMEOUT_MS
+        sendCommand(payload)
+        while (System.currentTimeMillis() < deadline) {
+            val frames = readFrames(deadline, what)
+            for (frame in frames) {
+                seqByte = frame.seq
+                if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                    sendAck(frame.seq)
+                }
+                if (frame.type == MdrConstants.TYPE_DATA_MDR && frame.payload.isNotEmpty()) {
+                    val cmd = frame.payload[0].toInt() and 0xFF
+                    if (expected.contains(cmd)) return
+                }
+            }
+        }
+        throw MdrProtocolException("Timeout en attendant: $what")
+    }
+
+    /** Lit le volume de lecture actuel du casque (0..30), ou null si non renseigné. */
+    fun readMusicVolume(): Int? {
+        val deadline = System.currentTimeMillis() + MdrConstants.SOCKET_TIMEOUT_MS
+        sendCommand(
+            byteArrayOf(
+                MdrConstants.CMD_PLAY_GET_PARAM.toByte(),
+                MdrConstants.PLAY_TYPE_MUSIC_VOLUME.toByte(),
+            ),
+        )
+        while (System.currentTimeMillis() < deadline) {
+            val frames = readFrames(deadline, "lecture volume")
+            for (frame in frames) {
+                seqByte = frame.seq
+                if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                    sendAck(frame.seq)
+                }
+                if (frame.type == MdrConstants.TYPE_DATA_MDR && frame.payload.size >= 3) {
+                    val cmd = frame.payload[0].toInt() and 0xFF
+                    val type = frame.payload[1].toInt() and 0xFF
+                    if ((cmd == MdrConstants.CMD_PLAY_RET_PARAM || cmd == MdrConstants.CMD_PLAY_NTFY_PARAM) &&
+                        type == MdrConstants.PLAY_TYPE_MUSIC_VOLUME
+                    ) {
+                        return frame.payload[2].toInt() and 0xFF
+                    }
+                }
+            }
+        }
+        return null
     }
 
     private fun readNcAsm(deadline: Long): NcAsmState {
