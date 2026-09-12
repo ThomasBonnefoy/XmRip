@@ -1,9 +1,48 @@
+# Gradle
 .gradle/
 build/
+/local.properties
+
+# IDE
 .idea/
 *.iml
-local.properties
+.vscode/
+
+# Kotlin (caches du compilateur)
+.kotlin/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Android / NDK
 /captures
 .externalNativeBuild
 .cxx
+
+# Artefacts de build — ne jamais committer un APK/AAB produit
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.hprof
+
+# Signing & secrets — ne JAMAIS committer
+*.jks
+*.keystore
+keystore.properties
+secrets.properties
+signing.properties
+
+# Logs
+*.log
+
+# Clone git upstream de libmdr (SonyHeadphonesClient) — ne jamais committer
+/SonyHeadphonesClient/
+
+# Config/outils locaux opencode (skills, node_modules) — ne jamais committer
+/.opencode/
+
+# Commandes locales ponctuelles
+*.local
