@@ -56,7 +56,7 @@ class MainActivity : Activity() {
     private var muted: Boolean = false
     private var volumeStep: Int = 1
     private var lastPhoneVolume: Int = -1
-    private val batteryPollMs = 2_000L
+    private val batteryPollMs = 30_000L
     private val phoneVolumePoller = android.os.Handler(android.os.Looper.getMainLooper())
     private val phoneVolumeRunnable = object : Runnable {
         override fun run() {
@@ -67,7 +67,7 @@ class MainActivity : Activity() {
     private val batteryPoller = android.os.Handler(android.os.Looper.getMainLooper())
     private val batteryRunnable = object : Runnable {
         override fun run() {
-            if (selectedDevice != null && !busy) refreshBattery()
+            if (selectedDevice != null && !busy) refreshBattery(silent = true)
             batteryPoller.postDelayed(this, batteryPollMs)
         }
     }
@@ -431,11 +431,11 @@ class MainActivity : Activity() {
     }
 
     @Suppress("MissingPermission")
-    private fun refreshBattery() {
+    private fun refreshBattery(silent: Boolean = false) {
         val device = selectedDevice ?: return
         if (busy) return
         busy = true
-        setStatus("Connexion à ${device.name}…")
+        if (!silent) setStatus("Connexion à ${device.name}…")
         Thread {
             try {
                 val report = HeadphoneClient.connectAndReadBattery(device)
