@@ -14,11 +14,14 @@ import android.os.Build
 import android.os.Bundle
 import android.os.ParcelUuid
 import android.view.Gravity
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import com.xmrip.app.bt.HeadphoneClient
@@ -48,6 +51,26 @@ class MainActivity : Activity() {
     private lateinit var autoAmbientCheck: CheckBox
     private lateinit var deviceList: ListView
     private lateinit var refreshButton: Button
+
+    private var lastVolume: Int = 20
+    private var muted: Boolean = false
+    private var volumeStep: Int = 1
+    private var lastPhoneVolume: Int = -1
+    private val batteryPollMs = 2_000L
+    private val phoneVolumePoller = android.os.Handler(android.os.Looper.getMainLooper())
+    private val phoneVolumeRunnable = object : Runnable {
+        override fun run() {
+            syncPhoneVolume()
+            phoneVolumePoller.postDelayed(this, 1000)
+        }
+    }
+    private val batteryPoller = android.os.Handler(android.os.Looper.getMainLooper())
+    private val batteryRunnable = object : Runnable {
+        override fun run() {
+            if (selectedDevice != null && !busy) refreshBattery()
+            batteryPoller.postDelayed(this, batteryPollMs)
+        }
+    }
 
     private var ncAsmState: com.xmrip.app.protocol.NcAsmState? = null
     private var lastAmbientLevel: Int = MdrConstants.AMBIENT_LEVEL_DEFAULT
@@ -114,12 +137,31 @@ class MainActivity : Activity() {
         super.onResume()
         registerReceiver(uuidReceiver, IntentFilter(BluetoothDevice.ACTION_UUID))
         requestPermissionIfNeeded()
+        phoneVolumePoller.post(phoneVolumeRunnable)
+        batteryPoller.post(batteryRunnable)
     }
 
     override fun onPause() {
         super.onPause()
+        phoneVolumePoller.removeCallbacks(phoneVolumeRunnable)
+        batteryPoller.removeCallbacks(batteryRunnable)
         runOnUiThread { deviceList.removeCallbacks(uuidScanRunnable) }
         runCatching { unregisterReceiver(uuidReceiver) }
+    }
+
+    /** Répercute le volume musique du téléphone (mis à jour par AVRCP, y compris quand le casque bouge son propre volume). */
+    private fun syncPhoneVolume() {
+        val am = getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager ?: return
+        val phone = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+        val maxPhone = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+        if (phone == lastPhoneVolume) return
+        lastPhoneVolume = phone
+        if (maxPhone > 0 && !muted) {
+            val headset = Math.round(phone.toFloat() * MdrConstants.PLAY_VOLUME_MAX / maxPhone)
+                .coerceIn(0, MdrConstants.PLAY_VOLUME_MAX)
+            lastVolume = headset
+        }
+        updateVolumeLabel(null)
     }
 
     private fun buildUi() {
@@ -236,12 +278,13 @@ class MainActivity : Activity() {
             }
         }
 
+        buildSettingsUi(root)
+
         deviceList = ListView(this)
         val lpList = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
-            0,
+            (260 * resources.displayMetrics.density).toInt(),
         )
-        lpList.weight = 1f
         lpList.topMargin = (12 * resources.displayMetrics.density).toInt()
         root.addView(deviceList, lpList)
 
@@ -254,8 +297,137 @@ class MainActivity : Activity() {
             if (selectedDevice != null) refreshBattery() else listDevices()
         }
 
-        setContentView(root)
+        val scroll = ScrollView(this)
+        scroll.isFillViewport = true
+        scroll.addView(root)
+        setContentView(scroll)
         setStatus("Recherche du casque…")
+    }
+
+    private var volumeLabel: TextView? = null
+
+    /** Réglages supplémentaires, une ligne par fonction (pas de soin esthétique). */
+    private fun buildSettingsUi(root: LinearLayout) {
+        sectionLabel(root, "Réglages")
+
+        volumeLabel = TextView(this).apply {
+            textSize = 13f
+            text = "Volume : $lastVolume${if (muted) " (muet)" else ""}"
+        }
+        root.addView(volumeLabel)
+
+        val volMinus = Button(this).apply { text = "Volume −" }
+        val volPlus = Button(this).apply { text = "Volume +" }
+        val muteButton = Button(this).apply { text = "Muet" }
+        root.addView(makeRow(volMinus, volPlus, muteButton))
+        volMinus.setOnClickListener { changeVolume(-1) }
+        volPlus.setOnClickListener { changeVolume(+1) }
+        muteButton.setOnClickListener {
+            muted = !muted
+            updateVolumeLabel(muteButton)
+            runBluetoothCmd(if (muted) "Muet…" else "Rétablir le son…") { it.setMusicMute(muted, lastVolume) }
+        }
+
+        val (stepRow, stepSpinner) = makeSpinnerRow("Pas volume", listOf("1", "2", "3", "5"))
+        root.addView(stepRow)
+        stepSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                volumeStep = intArrayOf(1, 2, 3, 5)[position]
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+
+        val playBtn = Button(this).apply { text = "Lecture" }
+        val pauseBtn = Button(this).apply { text = "Pause" }
+        val prevBtn = Button(this).apply { text = "Précédent" }
+        val nextBtn = Button(this).apply { text = "Suivant" }
+        root.addView(makeRow(playBtn, pauseBtn, prevBtn, nextBtn))
+        playBtn.setOnClickListener { runBluetoothCmd("Lecture…") { it.playControl(MdrConstants.PLAY_CTRL_PLAY) } }
+        pauseBtn.setOnClickListener { runBluetoothCmd("Pause…") { it.playControl(MdrConstants.PLAY_CTRL_PAUSE) } }
+        prevBtn.setOnClickListener { runBluetoothCmd("Piste précédente…") { it.playControl(MdrConstants.PLAY_CTRL_TRACK_DOWN) } }
+        nextBtn.setOnClickListener { runBluetoothCmd("Piste suivante…") { it.playControl(MdrConstants.PLAY_CTRL_TRACK_UP) } }
+    }
+
+    private fun sectionLabel(root: LinearLayout, text: String) {
+        val label = TextView(this).apply {
+            this.text = text
+            textSize = 16f
+            setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+        }
+        val lp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+        lp.topMargin = (14 * resources.displayMetrics.density).toInt()
+        root.addView(label, lp)
+    }
+
+    private fun makeRow(vararg buttons: Button): LinearLayout {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        buttons.forEach { button ->
+            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            lp.leftMargin = (6 * resources.displayMetrics.density).toInt()
+            row.addView(button, lp)
+        }
+        return row
+    }
+
+    private fun makeSpinnerRow(label: String, entries: List<CharSequence>): Pair<LinearLayout, Spinner> {
+        val spinner = Spinner(this)
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, entries)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinner.adapter = adapter
+        val text = TextView(this).apply {
+            this.text = label
+            textSize = 13f
+            setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+        }
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.addView(text)
+        val lpSpinner = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        lpSpinner.leftMargin = (10 * resources.displayMetrics.density).toInt()
+        row.addView(spinner, lpSpinner)
+        return row to spinner
+    }
+
+    private fun changeVolume(delta: Int) {
+        lastVolume = (lastVolume + volumeStep * delta).coerceIn(0, MdrConstants.PLAY_VOLUME_MAX)
+        updateVolumeLabel(null)
+        runBluetoothCmd(if (delta < 0) "Volume −…" else "Volume +…") { it.setMusicVolume(lastVolume) }
+    }
+
+    private fun updateVolumeLabel(muteButton: Button?) {
+        volumeLabel?.text = "Volume : $lastVolume${if (muted) " (muet)" else ""}"
+        muteButton?.text = if (muted) "Rétablir le son" else "Muet"
+    }
+
+    /** Connexion complète + action Bluetooth, puis rafraîchit l'écran. */
+    @Suppress("MissingPermission")
+    private fun runBluetoothCmd(statusMsg: String, block: (MdrSession) -> Unit) {
+        val device = selectedDevice ?: return
+        if (busy) return
+        busy = true
+        setStatus(statusMsg)
+        Thread {
+            try {
+                val report = HeadphoneClient.connectAndApply(device, block)
+                LastDevice.save(this, device)
+                runOnUiThread {
+                    busy = false
+                    showBattery(device.name ?: "Casque", report)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    busy = false
+                    setStatus("Échec : ${e.message ?: e.javaClass.simpleName}\n\n" +
+                        "Vérifie que Sound Connect est fermé (un seul contrôleur à la fois).")
+                }
+            }
+        }.start()
     }
 
     @Suppress("MissingPermission")
@@ -284,9 +456,12 @@ class MainActivity : Activity() {
 
     private fun showBattery(deviceLabel: String, report: BatteryReport) {
         batteryBig.text = "${report.levelPercent}%"
+        report.musicVolume?.let { lastVolume = it.coerceIn(0, MdrConstants.PLAY_VOLUME_MAX) }
+        updateVolumeLabel(null)
         val modelLine = report.modelName?.let { "Modèle : $it" }
         detailText.text = listOfNotNull(
             "$deviceLabel — batterie ${report.levelPercent}% (${report.chargingLabel})",
+            report.musicVolume?.let { "Volume : $it" },
             report.ncAsm?.let { "Mode : ${it.label}" },
             modelLine,
             report.firmwareVersion?.let { "Firmware : $it" },
@@ -522,7 +697,7 @@ class MainActivity : Activity() {
             setStatus("Connexion à ${device.name} et application du mode…")
             setNcAsmMode(device, mode)
         } else {
-            setStatus("Connexion automatique à ${device.name}…")
+            setStatus("Connexion automatique à ${device.name}…") 
             refreshBattery()
         }
     }

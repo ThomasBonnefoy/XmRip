@@ -148,6 +148,24 @@ object HeadphoneClient {
         throw lastError ?: MdrProtocolException("Connexion impossible")
     }
 
+    /**
+     * Connexion complète (handshake + batterie/état NC/ASM) puis exécution d'une action
+     * quelconque sur la session. Renvoie le rapport pour rafraîchir l'écran.
+     */
+    @Suppress("MissingPermission")
+    fun connectAndApply(device: BluetoothDevice, block: (MdrSession) -> Unit): BatteryReport {
+        var lastError: Exception? = null
+        repeat(2) {
+            try {
+                return attemptApply(device, block)
+            } catch (e: Exception) {
+                lastError = e
+                Thread.sleep(1_000)
+            }
+        }
+        throw lastError ?: MdrProtocolException("Connexion impossible")
+    }
+
     private fun attempt(device: BluetoothDevice): BatteryReport {
         var socket: BluetoothSocket? = null
         try {
@@ -191,6 +209,23 @@ object HeadphoneClient {
             }
         }
         throw lastError ?: MdrProtocolException("Connexion impossible")
+    }
+
+    private fun attemptApply(device: BluetoothDevice, block: (MdrSession) -> Unit): BatteryReport {
+        var socket: BluetoothSocket? = null
+        try {
+            socket = device.createInsecureRfcommSocketToServiceRecord(SERVICE_UUID)
+            socket.connect()
+            val session = MdrSession(socket.inputStream, socket.outputStream)
+            val report = session.handshakeAndBattery()
+            block(session)
+            return report
+        } finally {
+            try {
+                socket?.close()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun attemptSetNcAsmFast(device: BluetoothDevice, mode: Int): NcAsmState {
