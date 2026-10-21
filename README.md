@@ -54,9 +54,11 @@ adb install -r app-debug.apk
 | Son ambiant automatique | ✔ |
 | Volume lecture (0..30) + muet | ✔ |
 | Contrôle transport (play / pause / piste) | ✔ |
+| Multipoint : liste des appareils, connecter / déconnecter / oublier, bascule de la lecture, mode appairage (Table 2, trames `0x0E`) | ✔ (compilé, à valider sur le casque) |
 | Extinction auto | à câbler dans l'UI |
 | Speak-to-Chat | à câbler dans l'UI |
-| Égaliseur (presets) | à câbler dans l'UI |
+| Égaliseur XM6 : préréglages (Heavy, Clear, Hard, Soft, Perso) + courbe à 10 bandes sur « Perso » (type `0x04`) | ✔ (vérifié sur un WH-1000XM6, firmware 3.1.5) |
+| Carte lecture : titre, artiste, pochette, bouton lecture / pause unique, curseur de progression | ✔ (titre, pochette et curseur demandent « Accès aux notifications ») |
 | DSEE (upscaling) | à câbler dans l'UI |
 | Fonctions panneaux tactiles (assignables) | à câbler dans l'UI |
 
