@@ -111,6 +111,30 @@ object MdrConstants {
 
     /** EqEbb InquiredType/Preset. */
     const val EQEBB_TYPE_PRESET_EQ = 0x00
+
+    /**
+     * Type d'inquiry que le XM6 est seul à comprendre (PRESET_EQ_AND_ERRORCODE) : la requête
+     * classique 0x00 reste sans réponse. Format : [cmd, type, préréglage, nbBandes, bandes+6...].
+     */
+    const val EQEBB_TYPE_PRESET_EQ_AND_ERRORCODE = 0x04
+
+    /** Préréglages acceptés par le XM6 (firmware 3.0.0+), à la place de la table classique ci-dessous. */
+    const val EQ_XM6_HEAVY = 0x30
+    const val EQ_XM6_CLEAR = 0x31
+    const val EQ_XM6_HARD = 0x32
+    const val EQ_XM6_SOFT = 0x33
+    const val EQ_XM6_CUSTOM = 0xA0
+
+    /** Égaliseur 10 bandes du XM6 : gain de -6 à +6 dB, envoyé avec un décalage de +6. */
+    const val EQ_XM6_BAND_COUNT = 10
+    const val EQ_BAND_GAIN_MIN = -6
+    const val EQ_BAND_GAIN_MAX = 6
+    const val EQ_BAND_OFFSET = 6
+
+    /** Attente de la notification après une écriture EQEBB, avant de relire l'état (le XM6 ne la renvoie pas toujours). */
+    const val EQ_ECHO_WAIT_MS = 1500L
+
+    // Préréglages de la table classique (autres modèles) ; le XM6 les ignore.
     const val EQ_OFF = 0x00
     const val EQ_ROCK = 0x01
     const val EQ_POP = 0x02
@@ -198,4 +222,51 @@ object MdrConstants {
     const val CHARGING_CHARGING = 1
     const val CHARGING_UNKNOWN = 2
     const val CHARGING_CHARGED = 3
+
+    /**
+     * Commands Table 2 (v2) — extraits de ProtocolV2T2.hpp. Envoyées dans des trames
+     * TYPE_DATA_MDR_NO2. Gestion des appareils appairés / multipoint (PERI_*).
+     */
+    const val CMD_PERI_GET_STATUS = 0x32
+    const val CMD_PERI_RET_STATUS = 0x33
+    const val CMD_PERI_SET_STATUS = 0x34
+    const val CMD_PERI_NTFY_STATUS = 0x35
+    const val CMD_PERI_GET_PARAM = 0x36
+    const val CMD_PERI_RET_PARAM = 0x37
+    const val CMD_PERI_NTFY_PARAM = 0x39
+    const val CMD_PERI_SET_EXT_PARAM = 0x3C
+    const val CMD_PERI_NTFY_EXT_PARAM = 0x3D
+
+    /** MessageMdrV2FunctionType_Table2 (support de la gestion des appareils). */
+    const val T2_FUNC_PAIRING_CLASSIC_BT = 0x30
+    const val T2_FUNC_PAIRING_WITH_COD_CLASSIC_BT = 0x32
+    const val T2_FUNC_PAIRING_WITH_COD_CLASSIC_LE = 0x33
+
+    /** PeripheralInquiredType. */
+    const val PERI_TYPE_PAIRING_CLASSIC_BT = 0x00
+    const val PERI_TYPE_SOURCE_SWITCH = 0x01
+    const val PERI_TYPE_PAIRING_WITH_COD = 0x02
+
+    /** PeripheralBluetoothMode. */
+    const val BT_MODE_NORMAL = 0x00
+    const val BT_MODE_INQUIRY_SCAN = 0x01
+
+    /** ConnectivityActionType. */
+    const val CONN_ACTION_DISCONNECT = 0x00
+    const val CONN_ACTION_CONNECT = 0x01
+    const val CONN_ACTION_UNPAIR = 0x02
+
+    const val MAC_ADDRESS_LENGTH = 17
+    const val PERIPHERAL_ACTION_TIMEOUT_MS = 25_000
+
+    /** PeripheralResult : le quartet bas vaut 2 tant que l'opération est en cours. */
+    const val PERIPHERAL_IN_PROGRESS = 0x02
+    const val PERIPHERAL_BUSY = 0x03
+
+    /** SourceSwitchControlResult. */
+    const val SOURCE_SWITCH_SUCCESS = 0x00
+    const val SOURCE_SWITCH_FAIL = 0x01
+    const val SOURCE_SWITCH_FAIL_CALLING = 0x02
+    const val SOURCE_SWITCH_FAIL_A2DP_NOT_CONNECT = 0x03
+    const val SOURCE_SWITCH_FAIL_VOICE_ASSISTANT = 0x04
 }
