@@ -154,8 +154,14 @@ object HeadphoneClient {
      */
     @Suppress("MissingPermission")
     fun connectAndApply(device: BluetoothDevice, block: (MdrSession) -> Unit): BatteryReport {
+        return connectAndApply(device, 2, block)
+    }
+
+    /** Comme [connectAndApply] avec un nombre de tentatives choisi (1 pour une action non rejouable, ex. désappairer). */
+    @Suppress("MissingPermission")
+    fun connectAndApply(device: BluetoothDevice, attempts: Int, block: (MdrSession) -> Unit): BatteryReport {
         var lastError: Exception? = null
-        repeat(2) {
+        repeat(attempts) {
             try {
                 return attemptApply(device, block)
             } catch (e: Exception) {
