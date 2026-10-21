@@ -56,6 +56,39 @@ data class EqState(
         }
 }
 
+enum class ListeningMode { STANDARD, BGM, CINEMA }
+
+/** Réglages de l'onglet Réglages ; un champ vaut null si le casque n'a pas répondu à sa lecture. */
+data class SettingsState(
+    val pauseWhenRemoved: Boolean?,
+    val speakToChat: Boolean?,
+    val dsee: Boolean?,
+    val bgm: Boolean?,
+    val bgmRoom: Int?,
+    val cinema: Boolean?,
+    /** Code brut de l'extinction auto (AUTO_POWER_OFF_*), null si non lu. */
+    val autoPowerOff: Int?,
+) {
+    /** Complète les champs non lus avec les valeurs précédentes : une lecture manquée ne doit pas griser le réglage. */
+    fun fillMissingFrom(old: SettingsState?) = if (old == null) this else SettingsState(
+        pauseWhenRemoved = pauseWhenRemoved ?: old.pauseWhenRemoved,
+        speakToChat = speakToChat ?: old.speakToChat,
+        dsee = dsee ?: old.dsee,
+        bgm = bgm ?: old.bgm,
+        bgmRoom = bgmRoom ?: old.bgmRoom,
+        cinema = cinema ?: old.cinema,
+        autoPowerOff = autoPowerOff ?: old.autoPowerOff,
+    )
+
+    val listeningMode: ListeningMode?
+        get() = when {
+            bgm == true -> ListeningMode.BGM
+            cinema == true -> ListeningMode.CINEMA
+            bgm == false || cinema == false -> ListeningMode.STANDARD
+            else -> null
+        }
+}
+
 /** Appareil appairé au casque (multipoint). [linkStatus] vaut 0 si l'appareil n'est pas connecté. */
 data class PairedDevice(
     val address: String,
@@ -285,42 +318,162 @@ class MdrSession(
         )
     }
 
-    /** Règle le délai d'extinction automatique. */
-    fun setAutoPowerOff(element: Int) {
-        sendAndAwait(
-            byteArrayOf(
-                MdrConstants.CMD_POWER_SET_PARAM.toByte(),
-                MdrConstants.POWER_TYPE_AUTO_POWER_OFF.toByte(),
-                element.toByte(),
-                element.toByte(),
-            ),
-            intArrayOf(MdrConstants.CMD_POWER_RET_PARAM, MdrConstants.CMD_POWER_NTFY_PARAM),
-            "réponse extinction auto",
+    // ---------------------------------------------------------------------------------------
+    // Réglages du casque : lecture groupée et écritures une à une (onglet Réglages)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Lit tous les réglages de l'onglet Réglages. Une lecture sans réponse (type non géré par le casque) donne
+     * null pour ce champ ; elle coûte [MdrConstants.SETTING_REPLY_WAIT_MS] d'attente.
+     */
+    fun readSettings(): SettingsState {
+        val ret = { cmd: Int -> intArrayOf(cmd, cmd + 2) }
+        val wear = readParam(MdrConstants.CMD_SYSTEM_GET_PARAM, ret(MdrConstants.CMD_SYSTEM_RET_PARAM), MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING)
+        val chat = readParam(MdrConstants.CMD_SYSTEM_GET_PARAM, ret(MdrConstants.CMD_SYSTEM_RET_PARAM), MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2)
+        val dsee = readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_UPSCALING)
+        val bgm = readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_BGM_MODE)
+        val cinema = readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_UPMIX_CINEMA)
+        val power = readParam(MdrConstants.CMD_POWER_GET_PARAM, ret(MdrConstants.CMD_POWER_RET_PARAM), MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING)
+        val enabled = { p: ByteArray? -> p?.let { (it[2].toInt() and 0xFF) == MdrConstants.V2_ENABLE } }
+        return SettingsState(
+            pauseWhenRemoved = enabled(wear),
+            speakToChat = enabled(chat),
+            dsee = dsee?.let { (it[2].toInt() and 0xFF) == MdrConstants.UPSCALING_AUTO },
+            bgm = enabled(bgm),
+            bgmRoom = bgm?.takeIf { it.size > 3 }?.let { it[3].toInt() and 0xFF },
+            cinema = enabled(cinema),
+            autoPowerOff = power?.let { it[2].toInt() and 0xFF },
         )
     }
 
-    /** Active/désactive Speak-to-Chat (détection AUTO, réactivation rapide). */
-    fun setSpeakToChat(enabled: Boolean) {
-        sendAndAwait(
+    /** Pause automatique quand on ôte le casque. */
+    fun setPauseWhenRemoved(on: Boolean) = writeParam(
+        byteArrayOf(
+            MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
+            MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING.toByte(),
+            (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
+        ),
+        intArrayOf(MdrConstants.CMD_SYSTEM_RET_PARAM, MdrConstants.CMD_SYSTEM_NTFY_PARAM),
+        MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING,
+    )
+
+    /** Active/désactive Speak-to-Chat sans toucher à sa sensibilité ni à son délai. */
+    fun setSpeakToChat(on: Boolean) = writeParam(
+        byteArrayOf(
+            MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
+            MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2.toByte(),
+            (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
+            MdrConstants.V2_VALUE_OFF.toByte(), // aperçu désactivé
+        ),
+        intArrayOf(MdrConstants.CMD_SYSTEM_RET_PARAM, MdrConstants.CMD_SYSTEM_NTFY_PARAM),
+        MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2,
+    )
+
+    /** Mode d'écoute : les deux réglages BGM et cinéma s'excluent, on éteint donc l'autre avant d'allumer le choisi. */
+    fun setListeningMode(mode: ListeningMode, room: Int = MdrConstants.ROOM_SMALL) {
+        when (mode) {
+            ListeningMode.STANDARD -> {
+                writeBgm(false, room)
+                writeCinema(false)
+            }
+            ListeningMode.BGM -> {
+                writeCinema(false)
+                writeBgm(true, room)
+            }
+            ListeningMode.CINEMA -> {
+                writeBgm(false, room)
+                writeCinema(true)
+            }
+        }
+    }
+
+    private fun writeBgm(on: Boolean, room: Int) = writeParam(
+        byteArrayOf(
+            MdrConstants.CMD_AUDIO_SET_PARAM.toByte(),
+            MdrConstants.AUDIO_TYPE_BGM_MODE.toByte(),
+            (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
+            room.toByte(),
+        ),
+        intArrayOf(MdrConstants.CMD_AUDIO_RET_PARAM, MdrConstants.CMD_AUDIO_NTFY_PARAM),
+        MdrConstants.AUDIO_TYPE_BGM_MODE,
+    )
+
+    private fun writeCinema(on: Boolean) = writeParam(
+        byteArrayOf(
+            MdrConstants.CMD_AUDIO_SET_PARAM.toByte(),
+            MdrConstants.AUDIO_TYPE_UPMIX_CINEMA.toByte(),
+            (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
+        ),
+        intArrayOf(MdrConstants.CMD_AUDIO_RET_PARAM, MdrConstants.CMD_AUDIO_NTFY_PARAM),
+        MdrConstants.AUDIO_TYPE_UPMIX_CINEMA,
+    )
+
+    /** Extinction automatique (type XM6 0x05) : [element] = AUTO_POWER_OFF_WHEN_REMOVED ou AUTO_POWER_OFF_DISABLE. */
+    fun setAutoPowerOff(element: Int) = writeParam(
+        byteArrayOf(
+            MdrConstants.CMD_POWER_SET_PARAM.toByte(),
+            MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING.toByte(),
+            element.toByte(),
+            0x00,
+        ),
+        intArrayOf(MdrConstants.CMD_POWER_RET_PARAM, MdrConstants.CMD_POWER_NTFY_PARAM),
+        MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING,
+    )
+
+    /** Éteint le casque ; il ne répond pas, la liaison se coupe. */
+    fun powerOff() {
+        sendCommand(
             byteArrayOf(
-                MdrConstants.CMD_SYSTEM_SET_EXT_PARAM.toByte(),
-                MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2.toByte(),
-                MdrConstants.STC_DETECT_AUTO.toByte(),
-                MdrConstants.STC_OFF_TIME_FAST.toByte(),
+                MdrConstants.CMD_POWER_SET_STATUS.toByte(),
+                MdrConstants.POWER_TYPE_POWER_OFF.toByte(),
+                MdrConstants.POWER_OFF_USER.toByte(),
             ),
-            intArrayOf(MdrConstants.CMD_SYSTEM_RET_EXT_PARAM, MdrConstants.CMD_SYSTEM_NTFY_EXT_PARAM),
-            "réponse speak-to-chat ext",
         )
-        sendAndAwait(
-            byteArrayOf(
-                MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
-                MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2.toByte(),
-                (if (enabled) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
-                MdrConstants.V2_VALUE_OFF.toByte(), // preview mode
-            ),
-            intArrayOf(MdrConstants.CMD_SYSTEM_RET_PARAM, MdrConstants.CMD_SYSTEM_NTFY_PARAM),
-            "réponse speak-to-chat",
-        )
+    }
+
+    /** Envoie une lecture et renvoie la réponse du type demandé, ou null si le casque ne répond pas à temps. */
+    private fun readParam(getCmd: Int, retCmds: IntArray, type: Int): ByteArray? {
+        val deadline = System.currentTimeMillis() + MdrConstants.SETTING_READ_WAIT_MS
+        sendCommand(byteArrayOf(getCmd.toByte(), type.toByte()))
+        return try {
+            awaitParam(deadline, "lecture réglage 0x%02X".format(type), retCmds, type)
+        } catch (e: MdrProtocolException) {
+            null
+        }
+    }
+
+    /**
+     * Envoie une écriture. Le casque acquitte toujours mais n'envoie pas toujours de notification : on
+     * attend un court instant puis on continue, la relecture donne l'état réel.
+     */
+    private fun writeParam(payload: ByteArray, retCmds: IntArray, type: Int) {
+        val deadline = System.currentTimeMillis() + MdrConstants.SETTING_REPLY_WAIT_MS
+        sendCommand(payload)
+        try {
+            awaitParam(deadline, "écriture réglage 0x%02X".format(type), retCmds, type)
+        } catch (e: MdrProtocolException) {
+            // Pas de notification : normal pour certains réglages.
+        }
+    }
+
+    private fun awaitParam(deadline: Long, what: String, retCmds: IntArray, type: Int): ByteArray {
+        while (System.currentTimeMillis() < deadline) {
+            var match: ByteArray? = null
+            for (frame in readFrames(deadline, what)) {
+                seqByte = frame.seq
+                if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                    sendAck(frame.seq)
+                }
+                if (match == null && frame.type == MdrConstants.TYPE_DATA_MDR && frame.payload.size >= 3 &&
+                    retCmds.contains(frame.payload[0].toInt() and 0xFF) &&
+                    (frame.payload[1].toInt() and 0xFF) == type
+                ) {
+                    match = frame.payload
+                }
+            }
+            if (match != null) return match
+        }
+        throw MdrProtocolException("Timeout en attendant: $what")
     }
 
     /** Lit l'égaliseur du XM6 (préréglage et bandes), ou null si le casque ne répond pas. */
@@ -424,17 +577,15 @@ class MdrSession(
     }
 
     /** Active/désactive le DSEE (upscaling automatique). */
-    fun setDsee(enabled: Boolean) {
-        sendAndAwait(
-            byteArrayOf(
-                MdrConstants.CMD_AUDIO_SET_PARAM.toByte(),
-                MdrConstants.AUDIO_TYPE_UPSCALING.toByte(),
-                (if (enabled) MdrConstants.UPSCALING_AUTO else MdrConstants.UPSCALING_OFF).toByte(),
-            ),
-            intArrayOf(MdrConstants.CMD_AUDIO_RET_PARAM, MdrConstants.CMD_AUDIO_NTFY_PARAM),
-            "réponse DSEE",
-        )
-    }
+    fun setDsee(enabled: Boolean) = writeParam(
+        byteArrayOf(
+            MdrConstants.CMD_AUDIO_SET_PARAM.toByte(),
+            MdrConstants.AUDIO_TYPE_UPSCALING.toByte(),
+            (if (enabled) MdrConstants.UPSCALING_AUTO else MdrConstants.UPSCALING_OFF).toByte(),
+        ),
+        intArrayOf(MdrConstants.CMD_AUDIO_RET_PARAM, MdrConstants.CMD_AUDIO_NTFY_PARAM),
+        MdrConstants.AUDIO_TYPE_UPSCALING,
+    )
 
     /** Affecte les fonctions des panneaux tactiles gauche/droit. */
     fun setAssignable(leftPreset: Int, rightPreset: Int) {

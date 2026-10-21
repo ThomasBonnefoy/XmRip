@@ -36,10 +36,12 @@ import com.xmrip.app.bt.HeadphoneClient
 import com.xmrip.app.bt.LastDevice
 import com.xmrip.app.protocol.BatteryReport
 import com.xmrip.app.protocol.EqState
+import com.xmrip.app.protocol.ListeningMode
 import com.xmrip.app.protocol.MdrConstants
 import com.xmrip.app.protocol.MdrSession
 import com.xmrip.app.protocol.PairedDevice
 import com.xmrip.app.protocol.PairedDevicesInfo
+import com.xmrip.app.protocol.SettingsState
 import java.util.Locale
 
 class MainActivity : Activity() {
@@ -51,7 +53,8 @@ class MainActivity : Activity() {
         private const val EXTRA_NC_ASM_MODE = "com.xmrip.app.extra.NC_ASM_MODE"
         private const val TAB_SOUND = 0
         private const val TAB_EQ = 1
-        private const val TAB_DEVICES = 2
+        private const val TAB_SETTINGS = 2
+        private const val TAB_DEVICES = 3
     }
 
     private lateinit var kit: UiKit
@@ -88,6 +91,7 @@ class MainActivity : Activity() {
     private lateinit var pageScroll: ScrollView
     private var currentTab = TAB_SOUND
     private var eqLoaded = false
+    private var settingsLoaded = false
     private var devicesLoaded = false
 
     private var lastVolume: Int = 20
@@ -259,8 +263,9 @@ class MainActivity : Activity() {
 
         val soundPage = buildSoundPage()
         val eqPage = buildEqPage()
+        val settingsPage = buildSettingsPage()
         val devicesPage = buildDevicesPage()
-        pages.addAll(listOf(soundPage, eqPage, devicesPage))
+        pages.addAll(listOf(soundPage, eqPage, settingsPage, devicesPage))
         pages.forEach { content.addView(it, kit.matchLp()) }
 
         pageScroll = ScrollView(this).apply {
@@ -296,7 +301,13 @@ class MainActivity : Activity() {
         header.addView(batteryBig, kit.lp(LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = kit.dp(8) })
 
         refreshButton = kit.iconButton(R.drawable.ic_ui_refresh, "Actualiser").apply {
-            setOnClickListener { if (selectedDevice != null) refreshBattery() else listDevices() }
+            setOnClickListener {
+                // Actualiser relit aussi l'onglet affiché (égaliseur, réglages ou appareils).
+                eqLoaded = false
+                settingsLoaded = false
+                devicesLoaded = false
+                if (selectedDevice != null) refreshBattery() else listDevices()
+            }
         }
         header.addView(refreshButton, kit.lp(kit.dp(44), kit.dp(40)))
         return header
@@ -312,6 +323,7 @@ class MainActivity : Activity() {
         listOf(
             "Son" to R.drawable.ic_ui_sound,
             "Égaliseur" to R.drawable.ic_ui_eq,
+            "Réglages" to R.drawable.ic_ui_settings,
             "Appareils" to R.drawable.ic_ui_devices,
         ).forEachIndexed { index, (label, icon) ->
             val tab = TextView(this).apply {
@@ -340,10 +352,20 @@ class MainActivity : Activity() {
             tab.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
         }
         pageScroll.scrollTo(0, 0)
-        // Première ouverture d'un onglet : on charge son état une fois, sans que Thomas ait à appuyer.
+        loadCurrentTabIfNeeded()
+    }
+
+    /**
+     * Première ouverture d'un onglet : on charge son état une fois, sans que Thomas ait à appuyer. Si l'app est
+     * occupée à ce moment, [showBattery] rappelle cette fonction dès la fin de la commande en cours.
+     */
+    private fun loadCurrentTabIfNeeded() {
         if (selectedDevice == null || busy) return
-        if (index == TAB_EQ && !eqLoaded) runEqCmd("Lecture de l'égaliseur…") { it.readEq() }
-        if (index == TAB_DEVICES && !devicesLoaded) runPairedCmd("Lecture des appareils…")
+        when (currentTab) {
+            TAB_EQ -> if (!eqLoaded) runEqCmd("Lecture de l'égaliseur…") { it.readEq() }
+            TAB_SETTINGS -> if (!settingsLoaded) runSettingsCmd("Lecture des réglages…") { it.readSettings() }
+            TAB_DEVICES -> if (!devicesLoaded) runPairedCmd("Lecture des appareils…")
+        }
     }
 
     // --- Onglet Son ------------------------------------------------------------------------
@@ -870,6 +892,207 @@ class MainActivity : Activity() {
         }
     }
 
+    // --- Onglet Réglages -------------------------------------------------------------------
+
+    private lateinit var listenButtons: List<Button>
+    private lateinit var roomRow: View
+    private lateinit var roomButtons: List<Button>
+    private lateinit var dseeSwitch: Switch
+    private lateinit var chatSwitch: Switch
+    private lateinit var wearSwitch: Switch
+    private lateinit var powerButtons: List<Button>
+    private lateinit var powerSummary: TextView
+    private var suppressSettings = false
+    private var lastListening: ListeningMode = ListeningMode.STANDARD
+    private var lastRoom = MdrConstants.ROOM_SMALL
+
+    private val listeningModes = listOf(ListeningMode.STANDARD, ListeningMode.BGM, ListeningMode.CINEMA)
+    private val rooms = listOf(MdrConstants.ROOM_SMALL, MdrConstants.ROOM_MIDDLE, MdrConstants.ROOM_LARGE)
+
+    /** Réglages du casque : écoute, conversation, port du casque et alimentation. */
+    private fun buildSettingsPage(): View {
+        val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        val listenCard = kit.card("Écoute")
+        listenCard.addView(kit.text("Mode d'écoute", 13f, secondary = true), kit.matchLp(top = 10))
+        val (listenRow, listen) = kit.segmented(listOf("Standard", "Musique de fond", "Cinéma"))
+        listenButtons = listen
+        listen.forEachIndexed { i, b ->
+            b.isEnabled = false
+            b.setOnClickListener {
+                val mode = listeningModes[i]
+                runSettingsCmd("Mode d'écoute…") { s ->
+                    s.setListeningMode(mode, lastRoom)
+                    s.readSettings()
+                }
+            }
+        }
+        listenCard.addView(listenRow, kit.matchLp(top = 4))
+        val (roomContainer, room) = kit.segmented(listOf("Chambre", "Salon", "Café"))
+        roomButtons = room
+        roomRow = roomContainer
+        room.forEachIndexed { i, b ->
+            b.setOnClickListener {
+                lastRoom = rooms[i]
+                runSettingsCmd("Taille de la pièce…") { s ->
+                    s.setListeningMode(ListeningMode.BGM, rooms[i])
+                    s.readSettings()
+                }
+            }
+        }
+        val roomBlock = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        roomBlock.addView(kit.text("Ambiance de la musique de fond", 13f, secondary = true), kit.matchLp(top = 12))
+        roomBlock.addView(roomContainer, kit.matchLp(top = 4))
+        listenCard.addView(roomBlock, kit.matchLp())
+        roomRow = roomBlock
+        dseeSwitch = settingSwitch(listenCard, "DSEE Extreme", "Restitue les aigus perdus par la compression") { on ->
+            runSettingsCmd("DSEE…") { s ->
+                s.setDsee(on)
+                s.readSettings()
+            }
+        }
+        page.addView(listenCard, kit.matchLp(bottom = 12))
+
+        val chatCard = kit.card("Conversation et port du casque")
+        chatSwitch = settingSwitch(chatCard, "Speak-to-Chat", "Met la musique en pause quand tu parles") { on ->
+            runSettingsCmd("Speak-to-Chat…") { s ->
+                s.setSpeakToChat(on)
+                s.readSettings()
+            }
+        }
+        wearSwitch = settingSwitch(chatCard, "Pause quand le casque est retiré", "La lecture reprend quand tu le remets") { on ->
+            runSettingsCmd("Pause au retrait…") { s ->
+                s.setPauseWhenRemoved(on)
+                s.readSettings()
+            }
+        }
+        page.addView(chatCard, kit.matchLp(bottom = 12))
+
+        val powerCard = kit.card("Alimentation")
+        powerSummary = kit.text("Extinction automatique", 13f, secondary = true)
+        powerCard.addView(powerSummary, kit.matchLp(top = 10))
+        val (powerRow, power) = kit.segmented(listOf("Au retrait du casque", "Jamais"))
+        powerButtons = power
+        val elements = listOf(MdrConstants.AUTO_POWER_OFF_WHEN_REMOVED, MdrConstants.AUTO_POWER_OFF_DISABLE)
+        power.forEachIndexed { i, b ->
+            b.isEnabled = false
+            b.setOnClickListener {
+                runSettingsCmd("Extinction automatique…") { s ->
+                    s.setAutoPowerOff(elements[i])
+                    s.readSettings()
+                }
+            }
+        }
+        powerCard.addView(powerRow, kit.matchLp(top = 4))
+        val offButton = kit.actionButton("Éteindre le casque", 14f).apply {
+            setTextColor(kit.p.danger)
+            setOnClickListener {
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Éteindre le casque ?")
+                    .setMessage("Le casque s'éteint tout de suite et la musique s'arrête. Rallume-le avec son bouton d'alimentation.")
+                    .setPositiveButton("Éteindre") { _, _ ->
+                        runBluetoothCmd("Extinction du casque…", attempts = 1) { it.powerOff() }
+                    }
+                    .setNegativeButton("Annuler", null)
+                    .show()
+            }
+        }
+        powerCard.addView(offButton, kit.matchLp(top = 14))
+        page.addView(powerCard, kit.matchLp())
+        return page
+    }
+
+    /** Ligne « titre, explication, interrupteur » ajoutée à [card] ; [onChange] n'est appelé que par l'utilisateur. */
+    private fun settingSwitch(card: LinearLayout, title: String, summary: String, onChange: (Boolean) -> Unit): Switch {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(kit.text(title, 15f, bold = true))
+        texts.addView(kit.text(summary, 12f, secondary = true), kit.matchLp(top = 1))
+        row.addView(texts, kit.lp(0, weight = 1f))
+        val toggle = Switch(this).apply { isEnabled = false }
+        toggle.setOnCheckedChangeListener { _, isChecked -> if (!suppressSettings) onChange(isChecked) }
+        row.addView(toggle)
+        card.addView(row, kit.matchLp(top = 14))
+        return toggle
+    }
+
+    /** Connexion au casque, action sur un réglage (une seule tentative) puis affichage de l'état relu. */
+    @Suppress("MissingPermission")
+    private fun runSettingsCmd(statusMsg: String, action: (MdrSession) -> SettingsState?) {
+        val device = selectedDevice
+        if (device == null) {
+            setStatus("Aucun casque sélectionné.")
+            return
+        }
+        if (busy) return
+        busy = true
+        setStatus(statusMsg)
+        Thread {
+            try {
+                var state: SettingsState? = null
+                val report = HeadphoneClient.connectAndApply(device, 1) { session -> state = action(session) }
+                LastDevice.save(this, device)
+                runOnUiThread {
+                    busy = false
+                    showBattery(device.name ?: "Casque", report)
+                    showSettings(state)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    busy = false
+                    // Réaffiche l'état connu : un interrupteur déplacé ne doit pas rester sur une valeur non appliquée.
+                    lastSettings?.let { showSettings(it) }
+                    setStatus("Échec : ${e.message ?: e.javaClass.simpleName}\n\n" +
+                        "Vérifie que Sound Connect est fermé (un seul contrôleur à la fois).")
+                }
+            }
+        }.start()
+    }
+
+    private var lastSettings: SettingsState? = null
+
+    private fun showSettings(read: SettingsState?) {
+        if (read == null) return
+        val state = read.fillMissingFrom(lastSettings)
+        settingsLoaded = true
+        lastSettings = state
+        suppressSettings = true
+        val mode = state.listeningMode
+        mode?.let { lastListening = it }
+        state.bgmRoom?.let { lastRoom = it }
+        listenButtons.forEachIndexed { i, b ->
+            b.isEnabled = mode != null
+            b.isSelected = listeningModes[i] == mode
+        }
+        roomRow.visibility = if (mode == ListeningMode.BGM) View.VISIBLE else View.GONE
+        roomButtons.forEachIndexed { i, b -> b.isSelected = rooms[i] == state.bgmRoom }
+        bindSwitch(dseeSwitch, state.dsee)
+        bindSwitch(chatSwitch, state.speakToChat)
+        bindSwitch(wearSwitch, state.pauseWhenRemoved)
+        val power = state.autoPowerOff
+        powerButtons.forEach { it.isEnabled = power != null }
+        powerButtons[0].isSelected = power == MdrConstants.AUTO_POWER_OFF_WHEN_REMOVED
+        powerButtons[1].isSelected = power == MdrConstants.AUTO_POWER_OFF_DISABLE
+        powerSummary.text = when (power) {
+            null -> "Extinction automatique : non rapportée par le casque"
+            MdrConstants.AUTO_POWER_OFF_WHEN_REMOVED -> "Extinction automatique : quand tu retires le casque"
+            MdrConstants.AUTO_POWER_OFF_DISABLE -> "Extinction automatique : désactivée"
+            else -> "Extinction automatique : code 0x%02X (durée choisie ailleurs)".format(power)
+        }
+        suppressSettings = false
+    }
+
+    private fun bindSwitch(toggle: Switch, value: Boolean?) {
+        toggle.isEnabled = value != null
+        toggle.isChecked = value == true
+    }
+
     // --- Onglet Appareils ------------------------------------------------------------------
 
     private lateinit var pairedContainer: LinearLayout
@@ -1137,14 +1360,14 @@ class MainActivity : Activity() {
 
     /** Connexion complète + action Bluetooth, puis rafraîchit l'écran. */
     @Suppress("MissingPermission")
-    private fun runBluetoothCmd(statusMsg: String, block: (MdrSession) -> Unit) {
+    private fun runBluetoothCmd(statusMsg: String, attempts: Int = 2, block: (MdrSession) -> Unit) {
         val device = selectedDevice ?: return
         if (busy) return
         busy = true
         setStatus(statusMsg)
         Thread {
             try {
-                val report = HeadphoneClient.connectAndApply(device, block)
+                val report = HeadphoneClient.connectAndApply(device, attempts, block)
                 LastDevice.save(this, device)
                 runOnUiThread {
                     busy = false
@@ -1197,6 +1420,8 @@ class MainActivity : Activity() {
             report.chargingLabel.takeIf { charging || report.chargingStatus == MdrConstants.CHARGING_CHARGED },
         ).joinToString(" · ")
         updateNcAsmButtons(report)
+        // Après la mise à jour de l'écran en cours, charge l'onglet affiché s'il attendait que l'app soit libre.
+        window.decorView.post { loadCurrentTabIfNeeded() }
         val notXm6 = report.modelName?.takeIf { !it.uppercase().contains("XM6") }
         if (notXm6 != null) {
             setStatus("⚠️ $notXm6 n'est pas le WH-1000XM6 : support non garanti.")
@@ -1452,6 +1677,7 @@ class MainActivity : Activity() {
         deviceCard.visibility = View.GONE
         refreshButton.isEnabled = true
         eqLoaded = false
+        settingsLoaded = false
         devicesLoaded = false
         titleText.text = device.name ?: "Casque"
         batteryBig.text = "—"

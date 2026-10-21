@@ -60,6 +60,11 @@ object MdrConstants {
     const val CMD_PLAY_SET_PARAM = 0xA8
     const val CMD_PLAY_NTFY_PARAM = 0xA9
 
+    /** Requêtes de lecture et arrêt à distance, absentes de la liste d'origine. */
+    const val CMD_POWER_SET_STATUS = 0x24
+    const val CMD_AUDIO_GET_PARAM = 0xE6
+    const val CMD_SYSTEM_GET_PARAM = 0xF6
+
     /** AUDIO */
     const val CMD_AUDIO_RET_PARAM = 0xE7
     const val CMD_AUDIO_SET_PARAM = 0xE8
@@ -109,6 +114,22 @@ object MdrConstants {
     const val AUTO_POWER_OFF_15_MIN = 0x04
     const val AUTO_POWER_OFF_DISABLE = 0x11
 
+    /** Le XM6 règle l'extinction auto par le type 0x05 (avec détection du port) ; 0x10 = au retrait du casque. */
+    const val POWER_TYPE_AUTO_POWER_OFF_WEARING = 0x05
+    const val AUTO_POWER_OFF_WHEN_REMOVED = 0x10
+    const val POWER_TYPE_POWER_OFF = 0x03
+    const val POWER_OFF_USER = 0x01
+
+    /** Pause à l'ôtage du casque (famille SYSTEM, valeur inversée : 0 = activé). */
+    const val SYSTEM_TYPE_PLAYBACK_BY_WEARING = 0x01
+
+    /** Modes d'écoute (famille AUDIO, valeurs inversées : 0 = activé) ; le BGM porte la taille de la pièce. */
+    const val AUDIO_TYPE_BGM_MODE = 0x09
+    const val AUDIO_TYPE_UPMIX_CINEMA = 0x04
+    const val ROOM_SMALL = 0x00
+    const val ROOM_MIDDLE = 0x01
+    const val ROOM_LARGE = 0x02
+
     /** EqEbb InquiredType/Preset. */
     const val EQEBB_TYPE_PRESET_EQ = 0x00
 
@@ -133,6 +154,15 @@ object MdrConstants {
 
     /** Attente de la notification après une écriture EQEBB, avant de relire l'état (le XM6 ne la renvoie pas toujours). */
     const val EQ_ECHO_WAIT_MS = 1500L
+
+    /** Attente de la notification après l'écriture d'un réglage (onglet Réglages) ; elle ne vient pas toujours. */
+    const val SETTING_REPLY_WAIT_MS = 1500L
+
+    /**
+     * Attente de la réponse à une lecture. Après un changement de mode d'écoute, le casque envoie une rafale
+     * de notifications spontanées qui retarde ses réponses de plus d'une seconde.
+     */
+    const val SETTING_READ_WAIT_MS = 4000L
 
     // Préréglages de la table classique (autres modèles) ; le XM6 les ignore.
     const val EQ_OFF = 0x00

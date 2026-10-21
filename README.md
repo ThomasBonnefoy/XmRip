@@ -55,11 +55,13 @@ adb install -r app-debug.apk
 | Volume lecture (0..30) + muet | ✔ |
 | Contrôle transport (play / pause / piste) | ✔ |
 | Multipoint : liste des appareils, connecter / déconnecter / oublier, bascule de la lecture, mode appairage (Table 2, trames `0x0E`) | ✔ (compilé, à valider sur le casque) |
-| Extinction auto | à câbler dans l'UI |
-| Speak-to-Chat | à câbler dans l'UI |
+| Extinction auto (au retrait du casque / jamais, type `0x05`) | ✔ (vérifié sur un WH-1000XM6, firmware 3.1.5) |
+| Speak-to-Chat (activer / désactiver) + pause quand le casque est retiré | ✔ (vérifié sur un WH-1000XM6) |
 | Égaliseur XM6 : préréglages (Heavy, Clear, Hard, Soft, Perso) + courbe à 10 bandes sur « Perso » (type `0x04`) | ✔ (vérifié sur un WH-1000XM6, firmware 3.1.5) |
 | Carte lecture : titre, artiste, pochette, bouton lecture / pause unique, curseur de progression | ✔ (titre, pochette et curseur demandent « Accès aux notifications ») |
-| DSEE (upscaling) | à câbler dans l'UI |
+| DSEE Extreme | ✔ (vérifié sur un WH-1000XM6) |
+| Mode d'écoute : Standard / Musique de fond (3 ambiances) / Cinéma | ✔ (vérifié sur un WH-1000XM6 ; l'ambiance de la musique de fond n'a pas été essayée) |
+| Éteindre le casque à distance | ✔ (non essayé) |
 | Fonctions panneaux tactiles (assignables) | à câbler dans l'UI |
 
 La vérification se fait sur le casque réel — aucune suite de tests automatisés pour l'instant.
