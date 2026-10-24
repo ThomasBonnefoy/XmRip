@@ -6,7 +6,7 @@ App Android open-source qui remplace **Sony Sound Connect** pour contrôler le c
 
 - Connexion RFCOMM au service "Serial HPC" du casque (`createInsecureRfcommSocketToServiceRecord`), sur des appareils déjà appairés.
 - Le protocole **MDR v2** repose sur des trames `0x3E / 0x3C`, avec échappement `0x3D`, checksum et acquittement (`ACK`) de chaque trame de données.
-- Une session complète (handshake : protocol info → capability info → device info → support function → power status) est obligatoire avant toute commande. Chaque action ouvre sa propre socket, exécute, puis ferme la socket.
+- Le handshake se limite à firmware, modèle et état (batterie, bruit, volume) ; la liaison reste ouverte entre deux actions (fermée après 90 s d'inactivité, ou gardée tant qu'une action de geste est choisie). L'état suit les notifications du casque.
 
 ## Source de vérité du protocole
 
@@ -38,7 +38,7 @@ APK de sortie : `app/build/outputs/apk/debug/app-debug.apk`
 Installation sur appareil connecté (avec le débogage USB activé) :
 
 ```
-adb install -r app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 - `compileSdk`/`targetSdk` : 37, `minSdk` : 24, jvmTarget 17.
@@ -62,7 +62,12 @@ adb install -r app-debug.apk
 | DSEE Extreme | ✔ (vérifié sur un WH-1000XM6) |
 | Mode d'écoute : Standard / Musique de fond (3 ambiances) / Cinéma | ✔ (vérifié sur un WH-1000XM6 ; l'ambiance de la musique de fond n'a pas été essayée) |
 | Éteindre le casque à distance | ✔ (non essayé) |
-| Fonctions panneaux tactiles (assignables) | à câbler dans l'UI |
+| Son des notifications coupé quand l'ordinateur est connecté au casque (volume des notifications à 0, vibrations et pop-ups conservés ; lit la liste multipoint toutes les 30 s) | installé, son coupé vérifié par adb, à valider sur le téléphone |
+| Lecture à voix haute, dans le casque, des notifications d'applications choisies quand l'ordinateur n'est pas connecté (demande « l'accès aux notifications » ; musique baissée avec voix amplifiée, ou mise en pause, au choix ; option écran éteint seulement) | installé, voix vérifiée par adb, à valider sur le téléphone |
+| Bouton de bruit : modes que le bouton de l'oreillette gauche fait défiler (les trois / bruit et ambiant ; bruit et normal et ambiant et normal non essayés) | ✔ (vérifié sur un WH-1000XM6, firmware 3.1.5) |
+| Gestes du casque : le casque annonce glissés, double appui, main posée, double et triple appui du bouton de bruit (journal d'événements, `C4 01 00`) | ✔ (vérifié sur un WH-1000XM6) ; l'appui simple de la zone tactile n'envoie rien |
+| Actions du téléphone sur le double et le triple appui du bouton de bruit (touches média, ouvrir une application ; garde la session ouverte) | ✔ (vérifié sur un WH-1000XM6) |
+| Réglages de la zone tactile de droite (glissés, double tap, main posée) | aucune commande trouvée |
 
 La vérification se fait sur le casque réel — aucune suite de tests automatisés pour l'instant.
 
