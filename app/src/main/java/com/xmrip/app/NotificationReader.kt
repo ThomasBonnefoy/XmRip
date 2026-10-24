@@ -192,6 +192,81 @@ object NotificationReader {
         prefs(context).edit().putString(KEY_MODE, mode).apply()
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Choix de la voix
+    //
+    // La voix « robotique » est souvent la voix hors ligne de base. Le moteur de Google propose aussi, pour le
+    // français, des voix « en ligne » (réseau), nettement plus naturelles : on prend la meilleure disponible, en ligne
+    // si le téléphone a internet, sinon la meilleure hors ligne. Thomas peut aussi en imposer une.
+    // ---------------------------------------------------------------------------------------
+
+    private const val KEY_VOICE = "voice"
+
+    /** Nom de la voix choisie, null = automatique (la plus naturelle disponible). */
+    fun voiceName(context: Context): String? = prefs(context).getString(KEY_VOICE, null)
+
+    fun setVoiceName(context: Context, name: String?) {
+        prefs(context).edit().putString(KEY_VOICE, name).apply()
+    }
+
+    private fun online(context: Context): Boolean = runCatching {
+        val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return false) ?: return false
+        caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }.getOrDefault(false)
+
+    /** Voix françaises installées (ou téléchargeables en ligne), les plus naturelles d'abord. */
+    fun frenchVoices(engine: TextToSpeech): List<android.speech.tts.Voice> {
+        val language = Locale.getDefault().language.takeIf { it == "fr" } ?: "fr"
+        return runCatching { engine.voices }.getOrNull().orEmpty()
+            .filter { it.locale.language == language && TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in it.features }
+            .sortedWith(
+                compareByDescending<android.speech.tts.Voice> { it.quality }
+                    .thenByDescending { it.isNetworkConnectionRequired }
+                    .thenBy { if (it.locale.country == "FR") 0 else 1 }
+                    .thenBy { it.name },
+            )
+    }
+
+    /** Voix à utiliser maintenant : celle choisie si elle est utilisable, sinon la meilleure disponible. */
+    fun pickVoice(context: Context, engine: TextToSpeech): android.speech.tts.Voice? {
+        val voices = frenchVoices(engine)
+        val net = online(context)
+        voiceName(context)?.let { name ->
+            voices.firstOrNull { it.name == name }?.let { if (!it.isNetworkConnectionRequired || net) return it }
+        }
+        return voices.firstOrNull { net || !it.isNetworkConnectionRequired }
+    }
+
+    /** « Voix C · France · en ligne » à partir de « fr-fr-x-frc-network ». */
+    fun voiceLabel(v: android.speech.tts.Voice): String {
+        val variant = Regex("-x-([a-z]+)").find(v.name)?.groupValues?.get(1)
+        val letter = variant?.lastOrNull()?.uppercaseChar()
+        val country = when (v.locale.country) {
+            "FR" -> "France"
+            "CA" -> "Canada"
+            "BE" -> "Belgique"
+            "CH" -> "Suisse"
+            else -> v.locale.displayCountry.ifEmpty { "français" }
+        }
+        val where = if (v.isNetworkConnectionRequired) "en ligne, plus naturelle" else "hors ligne"
+        return listOf(if (letter != null) "Voix $letter" else "Voix standard", country, where).joinToString(" · ")
+    }
+
+    /** Charge la liste des voix (le moteur démarre en quelques secondes) puis appelle [then] sur le thread d'interface. */
+    fun listVoices(context: Context, then: (List<android.speech.tts.Voice>) -> Unit) {
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        var engine: TextToSpeech? = null
+        engine = TextToSpeech(context.applicationContext) { status ->
+            val e = engine
+            val voices = if (status == TextToSpeech.SUCCESS && e != null) frenchVoices(e) else emptyList()
+            main.post {
+                then(voices)
+                runCatching { e?.shutdown() }
+            }
+        }
+    }
+
     /**
      * Voix du téléphone, dirigée vers le casque.
      *
@@ -245,6 +320,7 @@ object NotificationReader {
                         return@synchronized
                     }
                     if (engine.setLanguage(Locale.getDefault()) < TextToSpeech.LANG_AVAILABLE) engine.setLanguage(Locale.FRENCH)
+                    pickVoice(context, engine)?.let { engine.voice = it }
                     engine.setAudioAttributes(attributes)
                     engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {}
@@ -272,7 +348,9 @@ object NotificationReader {
             outstanding.incrementAndGet()
             val id = "xmrip-${nextId++}"
             val engine = tts ?: return finished()
-            Log.d(TAG, "Voix demandée ($id), mode ${mode(context)}")
+            // La connexion internet peut avoir changé depuis le démarrage : voix en ligne seulement si elle est là.
+            pickVoice(context, engine)?.let { if (engine.voice?.name != it.name) engine.voice = it }
+            Log.d(TAG, "Voix demandée ($id), mode ${mode(context)}, voix ${engine.voice?.name}")
             if (mode(context) == MODE_PAUSE) {
                 holdFocus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                 engine.speak(text, TextToSpeech.QUEUE_ADD, null, id)

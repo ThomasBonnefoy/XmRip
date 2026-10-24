@@ -978,6 +978,7 @@ class MdrSession(
     private fun sendCommand(payload: ByteArray, type: Int = MdrConstants.TYPE_DATA_MDR) {
         val frame = MdrFramer.pack(type, seqByte and 0xFF, payload)
         Log.d(LOG_TAG, "TX type=0x%02X seq=%d %s".format(type, seqByte and 0xFF, payload.toHex()))
+        FrameLog.add("→", type, payload)
         output.write(frame)
         output.flush()
     }
@@ -1278,6 +1279,7 @@ class MdrSession(
                     continue
                 }
                 lastData = frame
+                FrameLog.add("←", frame.type, frame.payload)
             }
             observe(frame)
             fresh.add(frame)

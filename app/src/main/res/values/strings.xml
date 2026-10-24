@@ -7,4 +7,11 @@
     <string name="shortcut_ambient_long">Activer le son ambiant</string>
     <string name="shortcut_off_short">Désactivé</string>
     <string name="shortcut_off_long">Désactiver la réduction de bruit</string>
+    <string name="tile_label">Mode du casque</string>
+    <string name="widget_label">Casque XmRip</string>
+    <string name="widget_description">Batterie et mode de bruit du casque, avec trois boutons pour changer de mode.</string>
+    <string name="widget_unknown">Mode inconnu</string>
+    <string name="widget_nc">Bruit</string>
+    <string name="widget_ambient">Ambiant</string>
+    <string name="widget_off">Off</string>
 </resources>
