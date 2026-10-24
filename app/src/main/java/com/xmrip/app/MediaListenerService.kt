@@ -20,6 +20,8 @@ class MediaListenerService : NotificationListenerService() {
         // s'y accroche, sans service de premier plan ni notification permanente.
         PcWatcher.start(applicationContext)
         GestureWatcher.start(applicationContext)
+        // Relancé aussi après une mise à jour : les raccourcis sont republiés sans qu'il faille ouvrir l'app.
+        Shortcuts.publish(applicationContext)
         if (NotificationReader.isEnabled(this)) {
             (speaker ?: NotificationReader.Speaker(applicationContext).also { speaker = it }).warmUp()
         }
