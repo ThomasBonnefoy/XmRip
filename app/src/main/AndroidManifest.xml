@@ -14,6 +14,8 @@
     <!-- Notifications silencieuses quand le PC est connecté au casque (PcQuiet, PcWatcher) -->
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Lecture des notifications : voix « en ligne » (plus naturelle) seulement si internet est là -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Ouvrir une appli depuis un geste du casque quand XmRip tourne en arrière-plan (Android 10 et plus) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
@@ -42,15 +44,7 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
-            <!-- Écran de réglage de la règle « Ne pas déranger » créée par PcQuiet -->
-            <intent-filter>
-                <action android:name="android.app.action.AUTOMATIC_ZEN_RULE" />
-            </intent-filter>
-
-            <meta-data
-                android:name="android.app.shortcuts"
-                android:resource="@xml/shortcuts" />
+            <!-- Raccourcis : publiés par le code (Shortcuts.kt), plus par xml/shortcuts.xml. -->
         </activity>
         <activity
             android:name=".NcAsmActionActivity"
@@ -75,6 +69,31 @@
             android:name=".NcAsmService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Tuile des réglages rapides : mode de bruit et batterie, appui = mode suivant -->
+        <service
+            android:name=".NcTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_ui_nc"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- Widget d'écran d'accueil : batterie, mode et trois boutons -->
+        <receiver
+            android:name=".HeadsetWidget"
+            android:exported="true"
+            android:label="@string/widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info" />
+        </receiver>
 
     </application>
 </manifest>

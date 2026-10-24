@@ -140,11 +140,16 @@ object HeadphoneClient {
      * puis application du mode. Ne renvoie que l'état NC/ASM confirmé.
      */
     @Suppress("MissingPermission")
-    fun connectAndSetNcAsmFast(device: BluetoothDevice, mode: Int): NcAsmState {
+    fun connectAndSetNcAsmFast(
+        device: BluetoothDevice,
+        mode: Int,
+        ambientLevel: Int = MdrConstants.AMBIENT_LEVEL_DEFAULT,
+        autoEnabled: Boolean = false,
+    ): NcAsmState {
         var lastError: Exception? = null
         repeat(2) {
             try {
-                return attemptSetNcAsmFast(device, mode)
+                return attemptSetNcAsmFast(device, mode, ambientLevel, autoEnabled)
             } catch (e: Exception) {
                 lastError = e
                 Thread.sleep(1_000)
@@ -424,6 +429,6 @@ object HeadphoneClient {
             session.report!!
         }
 
-    private fun attemptSetNcAsmFast(device: BluetoothDevice, mode: Int): NcAsmState =
-        withSession(device, full = false) { it.setNcAsm(mode) }
+    private fun attemptSetNcAsmFast(device: BluetoothDevice, mode: Int, ambientLevel: Int, autoEnabled: Boolean): NcAsmState =
+        withSession(device, full = false) { it.setNcAsm(mode, ambientLevel, autoEnabled) }
 }
