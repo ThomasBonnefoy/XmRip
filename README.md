@@ -71,6 +71,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 La vérification se fait sur le casque réel — aucune suite de tests automatisés pour l'instant.
 
+## Outils de test sur PC
+
+- **Banc de test** (`tools/pc-bridge/`, module `desktop/`, `tools/xm.ps1`) : rejoue le code du protocole de l'app sur le vrai casque depuis Windows, sans téléphone ni APK (pont RFCOMM vers `127.0.0.1:9876`). Mode d'emploi : [`tools/pc-bridge/README.md`](tools/pc-bridge/README.md).
+- Le casque n'accepte qu'une session de contrôle à la fois : fermer l'app du téléphone (ou couper ses actions de gestes) pendant les essais.
+
 ## Licence
 
 Le code de XmRip est sous licence MIT (voir [`LICENSE.md`](LICENSE.md)) ; la partie protocole provient de `libmdr` ([mos9527/SonyHeadphonesClient](https://github.com/mos9527/SonyHeadphonesClient)), aussi sous licence MIT (voir `reference/LICENSE`).
