@@ -74,6 +74,7 @@ La vérification se fait sur le casque réel — aucune suite de tests automatis
 ## Outils de test sur PC
 
 - **Banc de test** (`tools/pc-bridge/`, module `desktop/`, `tools/xm.ps1`) : rejoue le code du protocole de l'app sur le vrai casque depuis Windows, sans téléphone ni APK (pont RFCOMM vers `127.0.0.1:9876`). Mode d'emploi : [`tools/pc-bridge/README.md`](tools/pc-bridge/README.md).
+- **Appli Windows de test** (`pc-app/`, WinForms .NET 10, un seul `.exe` autonome) : les réglages de l'app et un onglet Gestes, avec le protocole porté en C#. Sert à essayer une nouveauté sur le casque avant de la porter sur Android. Mode d'emploi : [`pc-app/README.md`](pc-app/README.md).
 - Le casque n'accepte qu'une session de contrôle à la fois : fermer l'app du téléphone (ou couper ses actions de gestes) pendant les essais.
 
 ## Licence
