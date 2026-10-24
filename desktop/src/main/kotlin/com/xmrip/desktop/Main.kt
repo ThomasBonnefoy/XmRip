@@ -23,6 +23,10 @@ Commandes (enchaînées dans une seule session) :
   auto on|off        son ambiant automatique
   volume [0..30]     lit ou règle le volume
   settings           lit les réglages
+  voice on|off       guidage vocal du casque
+  voice-volume N     volume du guidage vocal, -2 à 2
+  priority quality|connection   priorité qualité du son / stabilité de la connexion
+  chat-delay N       délai de reprise de Speak-to-Chat (0 court, 1 standard, 2 long, 3 jamais)
   eq                 lit l'égaliseur
   eq-preset NOM      heavy | clear | hard | soft | off
   eq-bands G1..G10   courbe personnalisée, 10 gains de -6 à 6 dB (graves en premier)
@@ -204,6 +208,13 @@ private fun run(session: MdrSession, rest: ArrayDeque<String>) {
         "auto" -> println(session.setAutoAmbient(rest.removeFirst() == "on").label)
         "volume" -> println(optInt()?.let { session.setMusicVolume(it) } ?: session.readMusicVolume())
         "settings" -> println(session.readSettings())
+        "voice" -> println(session.setVoiceGuidance(rest.removeFirst() == "on").let { "guidage ${it.voiceGuidance} volume ${it.voiceGuidanceVolume}" })
+        "voice-volume" -> println(session.setVoiceGuidanceVolume(rest.removeFirst().toInt()).let { "guidage ${it.voiceGuidance} volume ${it.voiceGuidanceVolume}" })
+        "priority" -> {
+            val value = if (rest.removeFirst() == "connection") MdrConstants.PRIORITY_CONNECTION else MdrConstants.PRIORITY_SOUND_QUALITY
+            println("priorité ${session.setConnectionPriority(value).connectionPriority}")
+        }
+        "chat-delay" -> println(session.setChatTimeout(rest.removeFirst().toInt()).let { "Speak-to-Chat sensibilité ${it.chatSensitivity} délai ${it.chatTimeout}" })
         "eq" -> println(session.readEq()?.let { "${it.label} ${it.bands}" })
         "eq-preset" -> {
             val id = when (val name = rest.removeFirst().lowercase()) {
