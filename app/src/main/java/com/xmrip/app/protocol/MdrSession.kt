@@ -68,6 +68,16 @@ data class SettingsState(
     val cinema: Boolean?,
     /** Code brut de l'extinction auto (AUTO_POWER_OFF_*), null si non lu. */
     val autoPowerOff: Int?,
+    /** Fonction du bouton de bruit (NC_BUTTON_*), null si non lue. */
+    val ncButton: Int? = null,
+    /** Sensibilité (STC_DETECT_*) et délai de reprise (STC_OFF_TIME_*) de Speak-to-Chat. */
+    val chatSensitivity: Int? = null,
+    val chatTimeout: Int? = null,
+    /** Priorité de la liaison (PRIORITY_SOUND_QUALITY ou PRIORITY_CONNECTION). */
+    val connectionPriority: Int? = null,
+    /** Guidage vocal du casque (annonces « Bluetooth connecté »…) et son volume, de -2 à +2. */
+    val voiceGuidance: Boolean? = null,
+    val voiceGuidanceVolume: Int? = null,
 ) {
     /** Complète les champs non lus avec les valeurs précédentes : une lecture manquée ne doit pas griser le réglage. */
     fun fillMissingFrom(old: SettingsState?) = if (old == null) this else SettingsState(
@@ -78,6 +88,12 @@ data class SettingsState(
         bgmRoom = bgmRoom ?: old.bgmRoom,
         cinema = cinema ?: old.cinema,
         autoPowerOff = autoPowerOff ?: old.autoPowerOff,
+        ncButton = ncButton ?: old.ncButton,
+        chatSensitivity = chatSensitivity ?: old.chatSensitivity,
+        chatTimeout = chatTimeout ?: old.chatTimeout,
+        connectionPriority = connectionPriority ?: old.connectionPriority,
+        voiceGuidance = voiceGuidance ?: old.voiceGuidance,
+        voiceGuidanceVolume = voiceGuidanceVolume ?: old.voiceGuidanceVolume,
     )
 
     val listeningMode: ListeningMode?
@@ -122,6 +138,7 @@ class MdrSession(
     private val output: OutputStream,
 ) {
     private val reader = MdrFrameReader()
+    /** Séquence des commandes que NOUS envoyons : bit du dernier ACK reçu (voir [takeFresh]). */
     private var seqByte: Int = 0
     private val readBuffer = ByteArray(1024)
 
@@ -130,6 +147,35 @@ class MdrSession(
 
     /** Type PeripheralInquiredType à utiliser ; null = pas encore déterminé, -1 = non pris en charge. */
     private var pairingType: Int? = null
+
+    /**
+     * Dernière trame de données reçue. Le casque renvoie une trame quand il croit que son acquittement s'est perdu
+     * (liaison lente) : même type, même séquence, même contenu. La traiter comme une nouvelle réponse désynchronise
+     * la session (commande suivante envoyée avec la séquence d'une commande non acquittée, que le casque ignore).
+     */
+    private var lastData: MdrFrame? = null
+
+    /** Dernières valeurs connues, tenues à jour par le handshake et par les notifications du casque. */
+    var modelName: String? = null
+        private set
+    var firmwareVersion: String? = null
+        private set
+    private var batteryLevel: Int? = null
+    private var batteryCharging: Int = MdrConstants.CHARGING_UNKNOWN
+    private var knownNcAsm: NcAsmState? = null
+    private var knownVolume: Int? = null
+
+    /** Heure (ms) de la dernière lecture complète de batterie, bruit et volume (handshake ou [refreshStatus]). */
+    var statusAt: Long = 0L
+        private set
+
+    /** Vrai une fois le handshake complet fait : une session gardée ouverte ne le refait pas. */
+    var handshaken: Boolean = false
+        private set
+
+    /** Rapport construit depuis les dernières valeurs connues, sans aucun échange ; null avant la batterie. */
+    val report: BatteryReport?
+        get() = batteryLevel?.let { BatteryReport(modelName, firmwareVersion, it, batteryCharging, knownNcAsm, knownVolume) }
 
     companion object {
         const val MODE_NC = 0
@@ -145,27 +191,16 @@ class MdrSession(
     fun handshakeAndBattery(): BatteryReport {
         val deadline = System.currentTimeMillis() + MdrConstants.HANDSHAKE_TIMEOUT_MS
 
-        var modelName: String? = null
-        var firmwareVersion: String? = null
-        var battery: BatteryReport? = null
-
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_PROTOCOL_INFO.toByte(), 0x00))
-        noteProtocolInfo(awaitCommand(MdrConstants.CMD_CONNECT_RET_PROTOCOL_INFO, deadline, "handshake"))
-
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_CAPABILITY_INFO.toByte(), 0x00))
-        awaitCommand(MdrConstants.CMD_CONNECT_RET_CAPABILITY_INFO, deadline, "handshake")
-
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_DEVICE_INFO.toByte(), MdrConstants.DEVICE_INFO_FW_VERSION.toByte()))
-        firmwareVersion = readDeviceInfoString(awaitCommand(MdrConstants.CMD_CONNECT_RET_DEVICE_INFO, deadline, "fw version"))
-
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_DEVICE_INFO.toByte(), MdrConstants.DEVICE_INFO_MODEL_NAME.toByte()))
-        modelName = readDeviceInfoString(awaitCommand(MdrConstants.CMD_CONNECT_RET_DEVICE_INFO, deadline, "model name"))
-
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_DEVICE_INFO.toByte(), MdrConstants.DEVICE_INFO_SERIES_AND_COLOR.toByte()))
-        awaitCommand(MdrConstants.CMD_CONNECT_RET_DEVICE_INFO, deadline, "series & color")
-
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_SUPPORT_FUNCTION.toByte(), 0x00))
-        awaitCommand(MdrConstants.CMD_CONNECT_RET_SUPPORT_FUNCTION, deadline, "support function")
+        // Capacités, fonctions prises en charge et « série et couleur » ne sont plus demandés : leurs réponses ne sont
+        // jamais lues, le XM6 répond sans eux (essayé sur le casque), et chaque échange coûte 0,4 à 0,9 s. L'info de
+        // protocole (qui dit si la table 2 multipoint existe) attend qu'on en ait besoin ([ensureProtocolInfo]).
+        // Firmware et modèle ne sont lus que s'ils ne sont pas déjà connus ([seedDeviceInfo]).
+        if (firmwareVersion == null) {
+            firmwareVersion = readDeviceInfoString(requestDeviceInfo(MdrConstants.DEVICE_INFO_FW_VERSION, deadline, "fw version"))
+        }
+        if (modelName == null) {
+            modelName = readDeviceInfoString(requestDeviceInfo(MdrConstants.DEVICE_INFO_MODEL_NAME, deadline, "model name"))
+        }
 
         sendCommand(
             byteArrayOf(
@@ -177,25 +212,128 @@ class MdrSession(
         if (ret.size < 4 || (ret[1].toInt() and 0xFF) != MdrConstants.POWER_BATTERY) {
             throw MdrProtocolException("Réponse batterie inattendue")
         }
-        val level = ret[2].toInt() and 0xFF
-        val charging = ret[3].toInt() and 0xFF
+        batteryLevel = ret[2].toInt() and 0xFF
+        batteryCharging = ret[3].toInt() and 0xFF
 
-        var ncAsm: NcAsmState? = null
         try {
-            ncAsm = readNcAsm(deadline)
+            readNcAsm(deadline)
         } catch (_: Exception) {
             // Le casque peut ne pas répondre sur ce type NCASM ; on garde la batterie.
         }
 
-        var musicVolume: Int? = null
         try {
-            musicVolume = readMusicVolume()
+            readMusicVolume()
         } catch (_: Exception) {
             // Lecture du volume facultative.
         }
 
-        battery = BatteryReport(modelName, firmwareVersion, level, charging, ncAsm, musicVolume)
-        return battery
+        handshaken = true
+        statusAt = System.currentTimeMillis()
+        return report!!
+    }
+
+    /** Retient un modèle et un firmware déjà connus (d'une session précédente), pour ne pas les redemander au casque. */
+    fun seedDeviceInfo(model: String?, firmware: String?) {
+        if (modelName == null) modelName = model
+        if (firmwareVersion == null) firmwareVersion = firmware
+    }
+
+    /**
+     * Délai d'attente des échanges de la table 2 (info de protocole, fonctions, liste des appareils). Une surveillance
+     * en arrière-plan le réduit : quand un autre client tient la session de contrôle, le casque ne répond pas et
+     * l'attente par défaut (12 s) bloquerait tout le reste.
+     */
+    var exchangeTimeoutMs: Long = MdrConstants.HANDSHAKE_TIMEOUT_MS.toLong()
+    private var protocolKnown = false
+
+    /** Demande l'info de protocole (table 2 multipoint présente ou non) la première fois qu'elle sert. */
+    private fun ensureProtocolInfo() {
+        if (protocolKnown) return
+        val deadline = System.currentTimeMillis() + exchangeTimeoutMs
+        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_PROTOCOL_INFO.toByte(), 0x00))
+        noteProtocolInfo(awaitCommand(MdrConstants.CMD_CONNECT_RET_PROTOCOL_INFO, deadline, "info de protocole"))
+        protocolKnown = true
+    }
+
+    /**
+     * Relit batterie, bruit et volume sur une session déjà ouverte (3 échanges). Pour un rafraîchissement demandé
+     * explicitement : après une action, [report] suffit, il est tenu à jour par les réponses et notifications.
+     */
+    fun refreshStatus(): BatteryReport {
+        val deadline = System.currentTimeMillis() + MdrConstants.HANDSHAKE_TIMEOUT_MS
+        sendCommand(byteArrayOf(MdrConstants.CMD_POWER_GET_STATUS.toByte(), MdrConstants.POWER_BATTERY.toByte()))
+        awaitCommand(MdrConstants.CMD_POWER_RET_STATUS, deadline, "battery")
+        try {
+            readNcAsm(deadline)
+        } catch (_: Exception) {
+        }
+        try {
+            readMusicVolume()
+        } catch (_: Exception) {
+        }
+        statusAt = System.currentTimeMillis()
+        return report ?: throw MdrProtocolException("Réponse batterie inattendue")
+    }
+
+    /** Envoie une demande d'info appareil et attend la réponse de CE type (pas une réponse retardée d'un autre). */
+    private fun requestDeviceInfo(infoType: Int, deadline: Long, what: String): ByteArray {
+        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_DEVICE_INFO.toByte(), infoType.toByte()))
+        while (System.currentTimeMillis() < deadline) {
+            var match: ByteArray? = null
+            for (frame in readFrames(deadline, what)) {
+                if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                    sendAck(frame.seq)
+                }
+                if (match == null && frame.type == MdrConstants.TYPE_DATA_MDR && frame.payload.size >= 2 &&
+                    (frame.payload[0].toInt() and 0xFF) == MdrConstants.CMD_CONNECT_RET_DEVICE_INFO &&
+                    (frame.payload[1].toInt() and 0xFF) == infoType
+                ) {
+                    match = frame.payload
+                }
+            }
+            if (match != null) return match
+        }
+        throw MdrProtocolException("Timeout en attendant: $what")
+    }
+
+    /**
+     * Lit et acquitte ce qui est déjà arrivé, sans attendre. À appeler régulièrement sur une session gardée ouverte :
+     * le casque envoie des notifications spontanées (batterie, bruit, volume) et renvoie ce qu'on n'acquitte pas.
+     * Lève une exception si la liaison est coupée.
+     */
+    fun drain() {
+        val n = readNow()
+        if (n < 0) throw EOFException("Flux fermé par le casque")
+        if (n > 0) reader.feed(readBuffer.copyOf(n))
+        for (frame in takeFresh(reader.readAvailable())) {
+            if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                sendAck(frame.seq)
+            }
+        }
+    }
+
+    /**
+     * Envoie une commande brute (outil de diagnostic du banc PC) et renvoie tout ce que le casque envoie pendant
+     * [waitMs] : chaque élément est (type de trame, charge utile). Les trames de données sont acquittées.
+     */
+    fun rawExchange(payload: ByteArray, waitMs: Long = 2000, type: Int = MdrConstants.TYPE_DATA_MDR): List<Pair<Int, ByteArray>> {
+        val deadline = System.currentTimeMillis() + waitMs
+        if (payload.isNotEmpty()) sendCommand(payload, type)
+        val out = mutableListOf<Pair<Int, ByteArray>>()
+        while (System.currentTimeMillis() < deadline) {
+            val frames = try {
+                readFrames(deadline, "réponse brute")
+            } catch (e: MdrProtocolException) {
+                break
+            }
+            for (frame in frames) {
+                if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                    sendAck(frame.seq)
+                }
+                out += frame.type to frame.payload
+            }
+        }
+        return out
     }
 
     /**
@@ -261,18 +399,12 @@ class MdrSession(
     }
 
     /**
-     * Handshake minimal pour une action rapide (pas de metadata device/batterie) :
-     * protocol, capability puis support function.
+     * Handshake minimal pour une action rapide (raccourcis) : aucun échange. Le XM6 répond aux commandes sans
+     * handshake (essayé sur le casque) ; l'info de protocole n'est demandée que si le multipoint sert.
      */
+    @Suppress("UNUSED_PARAMETER")
     fun quickHandshake(deadline: Long) {
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_PROTOCOL_INFO.toByte(), 0x00))
-        noteProtocolInfo(awaitCommand(MdrConstants.CMD_CONNECT_RET_PROTOCOL_INFO, deadline, "handshake"))
-
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_CAPABILITY_INFO.toByte(), 0x00))
-        awaitCommand(MdrConstants.CMD_CONNECT_RET_CAPABILITY_INFO, deadline, "handshake")
-
-        sendCommand(byteArrayOf(MdrConstants.CMD_CONNECT_GET_SUPPORT_FUNCTION.toByte(), 0x00))
-        awaitCommand(MdrConstants.CMD_CONNECT_RET_SUPPORT_FUNCTION, deadline, "handshake")
+        handshaken = true
     }
 
     /** Handshake minimal puis application d'un mode NC/Ambiant/Désactivé. */
@@ -327,64 +459,203 @@ class MdrSession(
      * null pour ce champ ; elle coûte [MdrConstants.SETTING_REPLY_WAIT_MS] d'attente.
      */
     fun readSettings(): SettingsState {
-        val ret = { cmd: Int -> intArrayOf(cmd, cmd + 2) }
-        val wear = readParam(MdrConstants.CMD_SYSTEM_GET_PARAM, ret(MdrConstants.CMD_SYSTEM_RET_PARAM), MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING)
-        val chat = readParam(MdrConstants.CMD_SYSTEM_GET_PARAM, ret(MdrConstants.CMD_SYSTEM_RET_PARAM), MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2)
-        val dsee = readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_UPSCALING)
-        val bgm = readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_BGM_MODE)
-        val cinema = readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_UPMIX_CINEMA)
-        val power = readParam(MdrConstants.CMD_POWER_GET_PARAM, ret(MdrConstants.CMD_POWER_RET_PARAM), MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING)
-        val enabled = { p: ByteArray? -> p?.let { (it[2].toInt() and 0xFF) == MdrConstants.V2_ENABLE } }
-        return SettingsState(
-            pauseWhenRemoved = enabled(wear),
-            speakToChat = enabled(chat),
-            dsee = dsee?.let { (it[2].toInt() and 0xFF) == MdrConstants.UPSCALING_AUTO },
-            bgm = enabled(bgm),
-            bgmRoom = bgm?.takeIf { it.size > 3 }?.let { it[3].toInt() and 0xFF },
-            cinema = enabled(cinema),
-            autoPowerOff = power?.let { it[2].toInt() and 0xFF },
-        )
+        readSettingKinds(SettingKind.values().toSet())
+        return settingsCache
     }
 
-    /** Pause automatique quand on ôte le casque. */
-    fun setPauseWhenRemoved(on: Boolean) = writeParam(
-        byteArrayOf(
-            MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
-            MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING.toByte(),
-            (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
-        ),
-        intArrayOf(MdrConstants.CMD_SYSTEM_RET_PARAM, MdrConstants.CMD_SYSTEM_NTFY_PARAM),
-        MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING,
-    )
+    private enum class SettingKind { WEAR, CHAT, CHAT_EXT, DSEE, BGM, CINEMA, POWER, NC_BUTTON, CONNECTION, VOICE, VOICE_VOLUME }
 
-    /** Active/désactive Speak-to-Chat sans toucher à sa sensibilité ni à son délai. */
-    fun setSpeakToChat(on: Boolean) = writeParam(
-        byteArrayOf(
-            MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
-            MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2.toByte(),
-            (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
-            MdrConstants.V2_VALUE_OFF.toByte(), // aperçu désactivé
-        ),
-        intArrayOf(MdrConstants.CMD_SYSTEM_RET_PARAM, MdrConstants.CMD_SYSTEM_NTFY_PARAM),
-        MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2,
-    )
+    /** Dernier état connu des réglages : lectures, réponses et notifications du casque (voir [observe]). */
+    private var settingsCache = SettingsState(null, null, null, null, null, null, null)
 
-    /** Mode d'écoute : les deux réglages BGM et cinéma s'excluent, on éteint donc l'autre avant d'allumer le choisi. */
-    fun setListeningMode(mode: ListeningMode, room: Int = MdrConstants.ROOM_SMALL) {
+    /** Réglages tels que le casque les a annoncés en dernier, sans aucun échange. */
+    val settings: SettingsState get() = settingsCache
+
+    /**
+     * Après une écriture, attend que les notifications du casque confirment le nouvel état (le cache de réglages se
+     * met à jour à chaque trame reçue), au plus [MdrConstants.SETTING_CONFIRM_WAIT_MS] ; sinon relit explicitement
+     * [kinds]. Relire tout de suite était lent : après un changement de mode d'écoute le casque envoie une rafale de
+     * notifications qui retarde ses réponses de plus d'une seconde, alors que ces mêmes notifications portent déjà l'état.
+     */
+    private fun confirmSettings(kinds: Set<SettingKind>, expected: (SettingsState) -> Boolean) {
+        val deadline = System.currentTimeMillis() + MdrConstants.SETTING_CONFIRM_WAIT_MS
+        while (!expected(settingsCache)) {
+            try {
+                readFrames(deadline, "confirmation du réglage").forEach { frame ->
+                    if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                        sendAck(frame.seq)
+                    }
+                }
+            } catch (e: MdrProtocolException) {
+                readSettingKinds(kinds)
+                return
+            }
+        }
+    }
+
+    /** Lit seulement les réglages demandés ; chaque réponse met le cache à jour. */
+    private fun readSettingKinds(kinds: Set<SettingKind>) {
+        val ret = { cmd: Int -> intArrayOf(cmd, cmd + 2) }
+        for (kind in kinds) {
+            when (kind) {
+                SettingKind.WEAR -> readParam(MdrConstants.CMD_SYSTEM_GET_PARAM, ret(MdrConstants.CMD_SYSTEM_RET_PARAM), MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING)
+                SettingKind.CHAT -> readParam(MdrConstants.CMD_SYSTEM_GET_PARAM, ret(MdrConstants.CMD_SYSTEM_RET_PARAM), MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2)
+                SettingKind.DSEE -> readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_UPSCALING)
+                SettingKind.BGM -> readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_BGM_MODE)
+                SettingKind.CINEMA -> readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_UPMIX_CINEMA)
+                SettingKind.POWER -> readParam(MdrConstants.CMD_POWER_GET_PARAM, ret(MdrConstants.CMD_POWER_RET_PARAM), MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING)
+                SettingKind.NC_BUTTON -> readParam(MdrConstants.CMD_NCASM_GET_PARAM, ret(MdrConstants.CMD_NCASM_RET_PARAM), MdrConstants.NCASM_TYPE_BUTTON)
+                SettingKind.CHAT_EXT -> readParam(MdrConstants.CMD_SYSTEM_GET_EXT_PARAM, ret(MdrConstants.CMD_SYSTEM_RET_EXT_PARAM), MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2)
+                SettingKind.CONNECTION -> readParam(MdrConstants.CMD_AUDIO_GET_PARAM, ret(MdrConstants.CMD_AUDIO_RET_PARAM), MdrConstants.AUDIO_TYPE_CONNECTION_MODE)
+                SettingKind.VOICE -> readParamT2(MdrConstants.CMD_VOICE_GUIDANCE_GET_PARAM, MdrConstants.VOICE_GUIDANCE_TYPE_ON_OFF)
+                SettingKind.VOICE_VOLUME -> readParamT2(MdrConstants.CMD_VOICE_GUIDANCE_GET_PARAM, MdrConstants.VOICE_GUIDANCE_TYPE_VOLUME)
+            }
+        }
+    }
+
+    /** Lecture d'un réglage de la table 2 (guidage vocal) ; la réponse met le cache à jour via [observe]. */
+    private fun readParamT2(getCmd: Int, type: Int): ByteArray? {
+        sendCommandT2(byteArrayOf(getCmd.toByte(), type.toByte()))
+        return try {
+            awaitT2(System.currentTimeMillis() + MdrConstants.SETTING_READ_WAIT_MS, "lecture réglage t2 0x%02X".format(type)) {
+                (it[0].toInt() and 0xFF) == getCmd + 1 && (it[1].toInt() and 0xFF) == type
+            }
+        } catch (e: MdrProtocolException) {
+            null
+        }
+    }
+
+    /** Délai avant que la musique reprenne après Speak-to-Chat (STC_OFF_TIME_*) ; la sensibilité lue est renvoyée telle quelle. */
+    fun setChatTimeout(timeout: Int): SettingsState {
+        if (settingsCache.chatSensitivity == null) readSettingKinds(setOf(SettingKind.CHAT_EXT))
+        val sensitivity = settingsCache.chatSensitivity ?: MdrConstants.STC_DETECT_AUTO
+        writeParam(
+            byteArrayOf(
+                MdrConstants.CMD_SYSTEM_SET_EXT_PARAM.toByte(),
+                MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2.toByte(),
+                sensitivity.toByte(),
+                timeout.toByte(),
+            ),
+        )
+        confirmSettings(setOf(SettingKind.CHAT_EXT)) { it.chatTimeout == timeout }
+        return settingsCache
+    }
+
+    /** Priorité qualité du son ou stabilité de la connexion. Le casque ne notifie pas ce type : on relit. */
+    fun setConnectionPriority(priority: Int): SettingsState {
+        writeParam(
+            byteArrayOf(
+                MdrConstants.CMD_AUDIO_SET_PARAM.toByte(),
+                MdrConstants.AUDIO_TYPE_CONNECTION_MODE.toByte(),
+                priority.toByte(),
+            ),
+        )
+        readSettingKinds(setOf(SettingKind.CONNECTION))
+        return settingsCache
+    }
+
+    /** Active/désactive les annonces vocales du casque. Renvoie les réglages relus. */
+    fun setVoiceGuidance(on: Boolean): SettingsState {
+        sendCommandT2(
+            byteArrayOf(
+                MdrConstants.CMD_VOICE_GUIDANCE_SET_PARAM.toByte(),
+                MdrConstants.VOICE_GUIDANCE_TYPE_ON_OFF.toByte(),
+                (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
+            ),
+        )
+        awaitAck(System.currentTimeMillis() + MdrConstants.SETTING_REPLY_WAIT_MS)
+        confirmSettings(setOf(SettingKind.VOICE)) { it.voiceGuidance == on }
+        return settingsCache
+    }
+
+    /** Volume des annonces vocales, de -2 à +2, sans bip de confirmation. Renvoie les réglages relus. */
+    fun setVoiceGuidanceVolume(volume: Int): SettingsState {
+        val v = volume.coerceIn(MdrConstants.VOICE_GUIDANCE_VOLUME_MIN, MdrConstants.VOICE_GUIDANCE_VOLUME_MAX)
+        sendCommandT2(
+            byteArrayOf(
+                MdrConstants.CMD_VOICE_GUIDANCE_SET_PARAM.toByte(),
+                MdrConstants.VOICE_GUIDANCE_TYPE_VOLUME.toByte(),
+                v.toByte(),
+                MdrConstants.V2_VALUE_OFF.toByte(),
+            ),
+        )
+        awaitAck(System.currentTimeMillis() + MdrConstants.SETTING_REPLY_WAIT_MS)
+        confirmSettings(setOf(SettingKind.VOICE_VOLUME)) { it.voiceGuidanceVolume == v }
+        return settingsCache
+    }
+
+    /**
+     * Modes que le bouton de bruit (oreillette gauche) fait défiler : [function] = NC_BUTTON_*. Écriture `68 30 <f>`,
+     * notification `69 30 <f>`. Renvoie les réglages relus.
+     */
+    fun setNcButton(function: Int): SettingsState {
+        writeParam(
+            byteArrayOf(
+                MdrConstants.CMD_NCASM_SET_PARAM.toByte(),
+                MdrConstants.NCASM_TYPE_BUTTON.toByte(),
+                function.toByte(),
+            ),
+        )
+        confirmSettings(setOf(SettingKind.NC_BUTTON)) { it.ncButton == function }
+        return settingsCache
+    }
+
+    /** Pause automatique quand on ôte le casque. Renvoie les réglages relus. */
+    fun setPauseWhenRemoved(on: Boolean): SettingsState {
+        writeParam(
+            byteArrayOf(
+                MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
+                MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING.toByte(),
+                (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
+            ),
+        )
+        confirmSettings(setOf(SettingKind.WEAR)) { it.pauseWhenRemoved == on }
+        return settingsCache
+    }
+
+    /** Active/désactive Speak-to-Chat sans toucher à sa sensibilité ni à son délai. Renvoie les réglages relus. */
+    fun setSpeakToChat(on: Boolean): SettingsState {
+        writeParam(
+            byteArrayOf(
+                MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
+                MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2.toByte(),
+                (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
+                MdrConstants.V2_VALUE_OFF.toByte(), // aperçu désactivé
+            ),
+        )
+        confirmSettings(setOf(SettingKind.CHAT)) { it.speakToChat == on }
+        return settingsCache
+    }
+
+    /**
+     * Mode d'écoute : les deux réglages BGM et cinéma s'excluent, on éteint donc l'autre avant d'allumer le choisi.
+     * Un réglage déjà éteint d'après le dernier état connu n'est pas réécrit (chaque échange coûte du temps).
+     * Renvoie les réglages relus.
+     */
+    fun setListeningMode(mode: ListeningMode, room: Int = MdrConstants.ROOM_SMALL): SettingsState {
+        val known = settingsCache
         when (mode) {
             ListeningMode.STANDARD -> {
-                writeBgm(false, room)
-                writeCinema(false)
+                if (known.bgm != false) writeBgm(false, room)
+                if (known.cinema != false) writeCinema(false)
             }
             ListeningMode.BGM -> {
-                writeCinema(false)
+                if (known.cinema != false) writeCinema(false)
                 writeBgm(true, room)
             }
             ListeningMode.CINEMA -> {
-                writeBgm(false, room)
+                if (known.bgm != false) writeBgm(false, room)
                 writeCinema(true)
             }
         }
+        confirmSettings(setOf(SettingKind.BGM, SettingKind.CINEMA)) {
+            when (mode) {
+                ListeningMode.STANDARD -> it.bgm == false && it.cinema == false
+                ListeningMode.BGM -> it.bgm == true && it.cinema == false
+                ListeningMode.CINEMA -> it.cinema == true && it.bgm == false
+            }
+        }
+        return settingsCache
     }
 
     private fun writeBgm(on: Boolean, room: Int) = writeParam(
@@ -394,8 +665,6 @@ class MdrSession(
             (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
             room.toByte(),
         ),
-        intArrayOf(MdrConstants.CMD_AUDIO_RET_PARAM, MdrConstants.CMD_AUDIO_NTFY_PARAM),
-        MdrConstants.AUDIO_TYPE_BGM_MODE,
     )
 
     private fun writeCinema(on: Boolean) = writeParam(
@@ -404,21 +673,24 @@ class MdrSession(
             MdrConstants.AUDIO_TYPE_UPMIX_CINEMA.toByte(),
             (if (on) MdrConstants.V2_VALUE_ON else MdrConstants.V2_VALUE_OFF).toByte(),
         ),
-        intArrayOf(MdrConstants.CMD_AUDIO_RET_PARAM, MdrConstants.CMD_AUDIO_NTFY_PARAM),
-        MdrConstants.AUDIO_TYPE_UPMIX_CINEMA,
     )
 
-    /** Extinction automatique (type XM6 0x05) : [element] = AUTO_POWER_OFF_WHEN_REMOVED ou AUTO_POWER_OFF_DISABLE. */
-    fun setAutoPowerOff(element: Int) = writeParam(
-        byteArrayOf(
-            MdrConstants.CMD_POWER_SET_PARAM.toByte(),
-            MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING.toByte(),
-            element.toByte(),
-            0x00,
-        ),
-        intArrayOf(MdrConstants.CMD_POWER_RET_PARAM, MdrConstants.CMD_POWER_NTFY_PARAM),
-        MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING,
-    )
+    /**
+     * Extinction automatique (type XM6 0x05) : [element] = AUTO_POWER_OFF_WHEN_REMOVED ou AUTO_POWER_OFF_DISABLE.
+     * Renvoie les réglages relus.
+     */
+    fun setAutoPowerOff(element: Int): SettingsState {
+        writeParam(
+            byteArrayOf(
+                MdrConstants.CMD_POWER_SET_PARAM.toByte(),
+                MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING.toByte(),
+                element.toByte(),
+                0x00,
+            ),
+        )
+        confirmSettings(setOf(SettingKind.POWER)) { it.autoPowerOff == element }
+        return settingsCache
+    }
 
     /** Éteint le casque ; il ne répond pas, la liaison se coupe. */
     fun powerOff() {
@@ -443,16 +715,31 @@ class MdrSession(
     }
 
     /**
-     * Envoie une écriture. Le casque acquitte toujours mais n'envoie pas toujours de notification : on
-     * attend un court instant puis on continue, la relecture donne l'état réel.
+     * Envoie une écriture et attend seulement l'ACQUITTEMENT du casque (une cinquantaine de millisecondes), pas sa
+     * notification : elle ne vient pas toujours, et attendre jusqu'à [MdrConstants.SETTING_REPLY_WAIT_MS] à chaque
+     * écriture rendait le changement de mode d'écoute lent. L'état réel se relit ensuite ou arrive par notification.
      */
-    private fun writeParam(payload: ByteArray, retCmds: IntArray, type: Int) {
-        val deadline = System.currentTimeMillis() + MdrConstants.SETTING_REPLY_WAIT_MS
+    private fun writeParam(payload: ByteArray) {
         sendCommand(payload)
-        try {
-            awaitParam(deadline, "écriture réglage 0x%02X".format(type), retCmds, type)
-        } catch (e: MdrProtocolException) {
-            // Pas de notification : normal pour certains réglages.
+        awaitAck(System.currentTimeMillis() + MdrConstants.SETTING_REPLY_WAIT_MS)
+    }
+
+    /** Attend l'acquittement de la dernière commande ; sans lui avant [deadline], on continue (la liaison est lente). */
+    private fun awaitAck(deadline: Long) {
+        while (true) {
+            val frames = try {
+                readFrames(deadline, "acquittement")
+            } catch (e: MdrProtocolException) {
+                return
+            }
+            var acked = false
+            for (frame in frames) {
+                if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                    sendAck(frame.seq)
+                }
+                if (frame.type == MdrConstants.TYPE_ACK) acked = true
+            }
+            if (acked) return
         }
     }
 
@@ -460,7 +747,6 @@ class MdrSession(
         while (System.currentTimeMillis() < deadline) {
             var match: ByteArray? = null
             for (frame in readFrames(deadline, what)) {
-                seqByte = frame.seq
                 if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
                     sendAck(frame.seq)
                 }
@@ -513,10 +799,32 @@ class MdrSession(
      */
     private fun writeEq(payload: ByteArray): EqState? {
         sendCommand(payload)
-        val echo = try {
-            awaitEqReply(System.currentTimeMillis() + MdrConstants.EQ_ECHO_WAIT_MS, "réponse égaliseur")
-        } catch (e: MdrProtocolException) {
-            null
+        // Notification ou acquittement, le premier des deux : sans notification on relit tout de suite au lieu
+        // d'attendre la fin du délai (l'acquittement arrive en quelques dizaines de millisecondes).
+        val deadline = System.currentTimeMillis() + MdrConstants.EQ_ECHO_WAIT_MS
+        var acked = false
+        var echo: ByteArray? = null
+        while (!acked && echo == null) {
+            val frames = try {
+                readFrames(deadline, "réponse égaliseur")
+            } catch (e: MdrProtocolException) {
+                break
+            }
+            for (frame in frames) {
+                if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                    sendAck(frame.seq)
+                }
+                if (frame.type == MdrConstants.TYPE_ACK) acked = true
+                if (echo == null && frame.type == MdrConstants.TYPE_DATA_MDR && frame.payload.size >= 4) {
+                    val cmd = frame.payload[0].toInt() and 0xFF
+                    val type = frame.payload[1].toInt() and 0xFF
+                    if ((cmd == MdrConstants.CMD_EQEBB_RET_PARAM || cmd == MdrConstants.CMD_EQEBB_NTFY_PARAM) &&
+                        type == MdrConstants.EQEBB_TYPE_PRESET_EQ_AND_ERRORCODE
+                    ) {
+                        echo = frame.payload
+                    }
+                }
+            }
         }
         return if (echo != null) parseEq(echo) else readEq()
     }
@@ -544,7 +852,6 @@ class MdrSession(
         while (System.currentTimeMillis() < deadline) {
             var match: ByteArray? = null
             for (frame in readFrames(deadline, what)) {
-                seqByte = frame.seq
                 if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
                     sendAck(frame.seq)
                 }
@@ -576,30 +883,17 @@ class MdrSession(
         return EqState(preset, bands)
     }
 
-    /** Active/désactive le DSEE (upscaling automatique). */
-    fun setDsee(enabled: Boolean) = writeParam(
-        byteArrayOf(
-            MdrConstants.CMD_AUDIO_SET_PARAM.toByte(),
-            MdrConstants.AUDIO_TYPE_UPSCALING.toByte(),
-            (if (enabled) MdrConstants.UPSCALING_AUTO else MdrConstants.UPSCALING_OFF).toByte(),
-        ),
-        intArrayOf(MdrConstants.CMD_AUDIO_RET_PARAM, MdrConstants.CMD_AUDIO_NTFY_PARAM),
-        MdrConstants.AUDIO_TYPE_UPSCALING,
-    )
-
-    /** Affecte les fonctions des panneaux tactiles gauche/droit. */
-    fun setAssignable(leftPreset: Int, rightPreset: Int) {
-        sendAndAwait(
+    /** Active/désactive le DSEE (upscaling automatique). Renvoie les réglages relus. */
+    fun setDsee(enabled: Boolean): SettingsState {
+        writeParam(
             byteArrayOf(
-                MdrConstants.CMD_SYSTEM_SET_PARAM.toByte(),
-                MdrConstants.SYSTEM_TYPE_ASSIGNABLE_SETTINGS.toByte(),
-                0x02, // MDRPodArray<Preset> : count = 2
-                leftPreset.toByte(),
-                rightPreset.toByte(),
+                MdrConstants.CMD_AUDIO_SET_PARAM.toByte(),
+                MdrConstants.AUDIO_TYPE_UPSCALING.toByte(),
+                (if (enabled) MdrConstants.UPSCALING_AUTO else MdrConstants.UPSCALING_OFF).toByte(),
             ),
-            intArrayOf(MdrConstants.CMD_SYSTEM_RET_PARAM, MdrConstants.CMD_SYSTEM_NTFY_PARAM),
-            "réponse boutons",
         )
+        confirmSettings(setOf(SettingKind.DSEE)) { it.dsee == enabled }
+        return settingsCache
     }
 
     /**
@@ -612,7 +906,6 @@ class MdrSession(
         while (System.currentTimeMillis() < deadline) {
             val frames = readFrames(deadline, what)
             for (frame in frames) {
-                seqByte = frame.seq
                 if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
                     sendAck(frame.seq)
                 }
@@ -637,7 +930,6 @@ class MdrSession(
         while (System.currentTimeMillis() < deadline) {
             val frames = readFrames(deadline, "lecture volume")
             for (frame in frames) {
-                seqByte = frame.seq
                 if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
                     sendAck(frame.seq)
                 }
@@ -711,7 +1003,6 @@ class MdrSession(
         while (System.currentTimeMillis() < deadline) {
             var match: ByteArray? = null
             for (frame in readFrames(deadline, what)) {
-                seqByte = frame.seq
                 if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
                     sendAck(frame.seq)
                 }
@@ -733,11 +1024,12 @@ class MdrSession(
             if (cached < 0) throw MdrProtocolException(UNSUPPORTED_MULTIPOINT)
             return cached
         }
+        ensureProtocolInfo()
         if (!hasTable2) {
             pairingType = -1
             throw MdrProtocolException(UNSUPPORTED_MULTIPOINT)
         }
-        val deadline = System.currentTimeMillis() + MdrConstants.HANDSHAKE_TIMEOUT_MS
+        val deadline = System.currentTimeMillis() + exchangeTimeoutMs
         sendCommandT2(byteArrayOf(MdrConstants.CMD_CONNECT_GET_SUPPORT_FUNCTION.toByte(), 0x00))
         val ret = awaitT2(deadline, "fonctions table 2") {
             (it[0].toInt() and 0xFF) == MdrConstants.CMD_CONNECT_RET_SUPPORT_FUNCTION
@@ -765,7 +1057,7 @@ class MdrSession(
     /** Liste les appareils appairés au casque (et lesquels sont connectés / en lecture) + mode d'appairage. */
     fun readPairedDevices(): PairedDevicesInfo {
         val type = ensurePairingType()
-        val deadline = System.currentTimeMillis() + MdrConstants.HANDSHAKE_TIMEOUT_MS
+        val deadline = System.currentTimeMillis() + exchangeTimeoutMs
         sendCommandT2(byteArrayOf(MdrConstants.CMD_PERI_GET_PARAM.toByte(), type.toByte()))
         val ret = awaitT2(deadline, "appareils appairés") {
             val cmd = it[0].toInt() and 0xFF
@@ -787,6 +1079,7 @@ class MdrSession(
             // Mode d'appairage facultatif.
         }
         return PairedDevicesInfo(devices, pairingMode, ret.joinToString(" ") { "%02X".format(it) })
+            .also { pairedDevices = it }
     }
 
     /** [cmd, type, count, (mac[17], état, [classe d'appareil[3]], nom(len+octets)) * count, appareil en lecture] */
@@ -913,7 +1206,6 @@ class MdrSession(
         while (System.currentTimeMillis() < deadline) {
             val frames = readFrames(deadline, what)
             for (frame in frames) {
-                seqByte = frame.seq
                 if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
                     sendAck(frame.seq)
                 }
@@ -931,7 +1223,6 @@ class MdrSession(
         while (System.currentTimeMillis() < deadline) {
             val frames = readFrames(deadline, what)
             for (frame in frames) {
-                seqByte = frame.seq
                 if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
                     sendAck(frame.seq)
                 }
@@ -954,11 +1245,8 @@ class MdrSession(
      */
     private fun readFrames(deadline: Long, what: String): List<MdrFrame> {
         while (true) {
-            val available = reader.readAvailable()
-            if (available.isNotEmpty()) {
-                available.forEach { Log.d(LOG_TAG, "RX type=0x%02X seq=%d %s".format(it.type, it.seq, it.payload.toHex())) }
-                return available
-            }
+            val available = takeFresh(reader.readAvailable())
+            if (available.isNotEmpty()) return available
             if (System.currentTimeMillis() >= deadline) {
                 throw MdrProtocolException("Timeout en attendant: $what")
             }
@@ -968,16 +1256,201 @@ class MdrSession(
         }
     }
 
+    /**
+     * Écarte les trames de données renvoyées en double (voir [lastData]) après les avoir acquittées de nouveau, et
+     * note au passage batterie, bruit et volume annoncés par le casque. Ne renvoie que les trames nouvelles.
+     */
+    private fun takeFresh(frames: List<MdrFrame>): List<MdrFrame> {
+        if (frames.isEmpty()) return frames
+        val fresh = ArrayList<MdrFrame>(frames.size)
+        for (frame in frames) {
+            Log.d(LOG_TAG, "RX type=0x%02X seq=%d %s".format(frame.type, frame.seq, frame.payload.toHex()))
+            // Notre prochain numéro de séquence est celui du dernier ACQUITTEMENT reçu, pas celui de n'importe quelle
+            // trame : les trames de données du casque (réponses, mais aussi notifications spontanées) ont leur propre
+            // compteur. Pendant un échange les deux coïncident ; après une notification (titre, volume, appareils)
+            // ils divergent, et une commande envoyée avec la séquence de la précédente est ignorée sans même un
+            // acquittement (l'égaliseur ne répondait plus).
+            if (frame.type == MdrConstants.TYPE_ACK) seqByte = frame.seq
+            if (frame.type == MdrConstants.TYPE_DATA_MDR || frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+                if (frame == lastData) {
+                    Log.d(LOG_TAG, "RX doublon ignoré seq=%d".format(frame.seq))
+                    sendAck(frame.seq)
+                    continue
+                }
+                lastData = frame
+            }
+            observe(frame)
+            fresh.add(frame)
+        }
+        return fresh
+    }
+
+    /** Retient l'état annoncé dans une réponse ou une notification, qu'une commande l'ait demandé ou non. */
+    /** Prévenu quand le casque annonce un changement (touche du casque, autre appareil connecté, notification). */
+    interface StateListener {
+        fun onReport(report: BatteryReport)
+        fun onSettings(settings: SettingsState)
+        fun onDevices(info: PairedDevicesInfo)
+
+        /** Geste physique annoncé par le casque (« keyCustomBtnTwo »…), une fois [MdrSession.enableGestureLog] fait. */
+        fun onGesture(gesture: String) {}
+    }
+
+    /** Vrai une fois le journal d'événements du casque activé sur cette session. */
+    var gestureLogOn: Boolean = false
+        private set
+
+    /**
+     * Active le journal d'événements du casque (comme libmdr à l'initialisation) : sans cela il n'annonce aucun geste.
+     * Sans effet s'il est déjà actif sur cette session.
+     */
+    fun enableGestureLog() {
+        if (gestureLogOn) return
+        writeParam(byteArrayOf(MdrConstants.CMD_LOG_SET_STATUS.toByte(), 0x01, 0x00))
+        gestureLogOn = true
+    }
+
+    private var lastGesture: String? = null
+    private var lastGestureAt = 0L
+
+    /** Un même geste reçu deux fois à moins de 1,8 s est compté une fois (le casque l'a déjà renvoyé ainsi). */
+    private fun observeLog(p: ByteArray) {
+        val text = String(p, 2, p.size - 2, Charsets.ISO_8859_1).filter { it.code in 32..126 }
+        if (!text.startsWith("key")) return
+        val now = System.currentTimeMillis()
+        if (text == lastGesture && now - lastGestureAt < 1_800L) return
+        lastGesture = text
+        lastGestureAt = now
+        stateListener?.onGesture(text)
+    }
+
+    @Volatile
+    var stateListener: StateListener? = null
+
+    /** Dernière liste d'appareils appairés vue passer (réponse ou notification). */
+    var pairedDevices: PairedDevicesInfo? = null
+        private set
+
+    private fun observe(frame: MdrFrame) {
+        val p = frame.payload
+        if (frame.type == MdrConstants.TYPE_DATA_MDR_NO2) {
+            val before = settingsCache
+            observeVoiceGuidance(p)
+            if (settingsCache != before && handshaken) stateListener?.onSettings(settingsCache)
+            observeDevices(p)
+            return
+        }
+        if (frame.type != MdrConstants.TYPE_DATA_MDR || p.size < 3) return
+        if ((p[0].toInt() and 0xFF) == MdrConstants.CMD_LOG_NTFY_PARAM) {
+            observeLog(p)
+            return
+        }
+        val reportBefore = report
+        val settingsBefore = settingsCache
+        observeState(p)
+        val listener = stateListener ?: return
+        if (!handshaken) return
+        report?.takeIf { it != reportBefore }?.let { listener.onReport(it) }
+        if (settingsCache != settingsBefore) listener.onSettings(settingsCache)
+    }
+
+    /** Guidage vocal (réponse ou notification de la table 2) : marche/arrêt et volume signé. */
+    private fun observeVoiceGuidance(p: ByteArray) {
+        if (p.size < 3) return
+        val cmd = p[0].toInt() and 0xFF
+        if (cmd != MdrConstants.CMD_VOICE_GUIDANCE_RET_PARAM && cmd != MdrConstants.CMD_VOICE_GUIDANCE_NTFY_PARAM) return
+        when (p[1].toInt() and 0xFF) {
+            MdrConstants.VOICE_GUIDANCE_TYPE_ON_OFF ->
+                settingsCache = settingsCache.copy(voiceGuidance = (p[2].toInt() and 0xFF) == MdrConstants.V2_VALUE_ON)
+            MdrConstants.VOICE_GUIDANCE_TYPE_VOLUME ->
+                settingsCache = settingsCache.copy(voiceGuidanceVolume = p[2].toInt())
+        }
+    }
+
+    /** Liste des appareils du multipoint (réponse ou notification de la table 2). */
+    private fun observeDevices(p: ByteArray) {
+        if (p.size < 3) return
+        val cmd = p[0].toInt() and 0xFF
+        val type = p[1].toInt() and 0xFF
+        if (cmd != MdrConstants.CMD_PERI_RET_PARAM && cmd != MdrConstants.CMD_PERI_NTFY_PARAM) return
+        if (type != MdrConstants.PERI_TYPE_PAIRING_WITH_COD && type != MdrConstants.PERI_TYPE_PAIRING_CLASSIC_BT) return
+        val devices = try {
+            parsePairedDevices(p, withClassOfDevice = type == MdrConstants.PERI_TYPE_PAIRING_WITH_COD)
+        } catch (_: MdrProtocolException) {
+            return // notification tronquée : on garde la liste précédente
+        }
+        val info = PairedDevicesInfo(devices, pairedDevices?.pairingMode, p.joinToString(" ") { "%02X".format(it) })
+        pairedDevices = info
+        stateListener?.onDevices(info)
+    }
+
+    /** Retient batterie, bruit, volume et réglages annoncés dans une trame de la table 1. */
+    private fun observeState(p: ByteArray) {
+        val cmd = p[0].toInt() and 0xFF
+        val type = p[1].toInt() and 0xFF
+        val on = (p[2].toInt() and 0xFF) == MdrConstants.V2_ENABLE
+        when {
+            (cmd == MdrConstants.CMD_SYSTEM_RET_PARAM || cmd == MdrConstants.CMD_SYSTEM_NTFY_PARAM) &&
+                type == MdrConstants.SYSTEM_TYPE_PLAYBACK_BY_WEARING ->
+                settingsCache = settingsCache.copy(pauseWhenRemoved = on)
+            (cmd == MdrConstants.CMD_SYSTEM_RET_PARAM || cmd == MdrConstants.CMD_SYSTEM_NTFY_PARAM) &&
+                type == MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2 ->
+                settingsCache = settingsCache.copy(speakToChat = on)
+            (cmd == MdrConstants.CMD_AUDIO_RET_PARAM || cmd == MdrConstants.CMD_AUDIO_NTFY_PARAM) &&
+                type == MdrConstants.AUDIO_TYPE_UPSCALING ->
+                settingsCache = settingsCache.copy(dsee = (p[2].toInt() and 0xFF) == MdrConstants.UPSCALING_AUTO)
+            (cmd == MdrConstants.CMD_AUDIO_RET_PARAM || cmd == MdrConstants.CMD_AUDIO_NTFY_PARAM) &&
+                type == MdrConstants.AUDIO_TYPE_BGM_MODE ->
+                settingsCache = settingsCache.copy(
+                    bgm = on,
+                    bgmRoom = if (p.size > 3) p[3].toInt() and 0xFF else settingsCache.bgmRoom,
+                )
+            (cmd == MdrConstants.CMD_AUDIO_RET_PARAM || cmd == MdrConstants.CMD_AUDIO_NTFY_PARAM) &&
+                type == MdrConstants.AUDIO_TYPE_UPMIX_CINEMA ->
+                settingsCache = settingsCache.copy(cinema = on)
+            (cmd == MdrConstants.CMD_POWER_RET_PARAM || cmd == MdrConstants.CMD_POWER_NTFY_PARAM) &&
+                type == MdrConstants.POWER_TYPE_AUTO_POWER_OFF_WEARING ->
+                settingsCache = settingsCache.copy(autoPowerOff = p[2].toInt() and 0xFF)
+            (cmd == MdrConstants.CMD_NCASM_RET_PARAM || cmd == MdrConstants.CMD_NCASM_NTFY_PARAM) &&
+                type == MdrConstants.NCASM_TYPE_BUTTON ->
+                settingsCache = settingsCache.copy(ncButton = p[2].toInt() and 0xFF)
+            (cmd == MdrConstants.CMD_SYSTEM_RET_EXT_PARAM || cmd == MdrConstants.CMD_SYSTEM_NTFY_EXT_PARAM) &&
+                type == MdrConstants.SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2 && p.size >= 4 ->
+                settingsCache = settingsCache.copy(chatSensitivity = p[2].toInt() and 0xFF, chatTimeout = p[3].toInt() and 0xFF)
+            (cmd == MdrConstants.CMD_AUDIO_RET_PARAM || cmd == MdrConstants.CMD_AUDIO_NTFY_PARAM) &&
+                type == MdrConstants.AUDIO_TYPE_CONNECTION_MODE ->
+                settingsCache = settingsCache.copy(connectionPriority = p[2].toInt() and 0xFF)
+        }
+        observeStatus(p, cmd, type)
+    }
+
+    private fun observeStatus(p: ByteArray, cmd: Int, type: Int) {
+        when {
+            (cmd == MdrConstants.CMD_POWER_RET_STATUS || cmd == MdrConstants.CMD_POWER_NTFY_STATUS) &&
+                type == MdrConstants.POWER_BATTERY && p.size >= 4 -> {
+                batteryLevel = p[2].toInt() and 0xFF
+                batteryCharging = p[3].toInt() and 0xFF
+            }
+            (cmd == MdrConstants.CMD_NCASM_RET_PARAM || cmd == MdrConstants.CMD_NCASM_NTFY_PARAM) &&
+                type == MdrConstants.NCASM_TYPE_DUAL_NC_ASM_NA && p.size >= 7 ->
+                knownNcAsm = runCatching { parseNcAsm(p) }.getOrNull() ?: knownNcAsm
+            (cmd == MdrConstants.CMD_PLAY_RET_PARAM || cmd == MdrConstants.CMD_PLAY_NTFY_PARAM) &&
+                type == MdrConstants.PLAY_TYPE_MUSIC_VOLUME -> knownVolume = p[2].toInt() and 0xFF
+        }
+    }
+
     /** Lit un bloc d'octets si disponible ; renvoie 0 si rien (borné par le deadline via readFrames). */
     private fun readFromSocket(): Int {
+        val n = readNow()
+        if (n == 0) Thread.sleep(20)
+        return n
+    }
+
+    /** Comme [readFromSocket] sans pause quand il n'y a rien. */
+    private fun readNow(): Int {
         return try {
             val avail = input.available()
-            if (avail <= 0) {
-                Thread.sleep(20)
-                0
-            } else {
-                input.read(readBuffer, 0, avail.coerceAtMost(readBuffer.size))
-            }
+            if (avail <= 0) 0 else input.read(readBuffer, 0, avail.coerceAtMost(readBuffer.size))
         } catch (e: SocketTimeoutException) {
             0
         }
