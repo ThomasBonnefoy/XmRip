@@ -1,6 +1,49 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.XmRip" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Thème sombre « premium » : fond presque noir. -->
+    <style name="Theme.XmRip.Base.Dark" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:colorPrimary">@color/bg</item>
+        <item name="android:colorPrimaryDark">@color/bg</item>
+        <item name="android:colorBackground">@color/bg</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:alertDialogTheme">@style/Theme.XmRip.Dialog</item>
+    </style>
+
+    <!-- Thème clair : fond gris très pâle, surfaces blanches, même accent violet un peu plus soutenu. -->
+    <style name="Theme.XmRip.Base.Light" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">@color/accent_light</item>
+        <item name="android:colorPrimary">@color/bg_light</item>
+        <item name="android:colorPrimaryDark">@color/bg_light</item>
+        <item name="android:colorBackground">@color/bg_light</item>
+        <item name="android:windowBackground">@color/bg_light</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:alertDialogTheme">@style/Theme.XmRip.Dialog.Light</item>
+    </style>
+
+    <!-- Thème du manifeste : clair le jour, sombre la nuit (values-night) ; l'app choisit ensuite selon le réglage. -->
+    <style name="Theme.XmRip" parent="Theme.XmRip.Base.Light" />
+    <style name="Theme.XmRip.Dark" parent="Theme.XmRip.Base.Dark" />
+    <style name="Theme.XmRip.Light" parent="Theme.XmRip.Base.Light" />
+
+    <style name="Theme.XmRip.Dialog" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#FFA99DFF</item>
+        <item name="android:windowBackground">@drawable/dialog_bg</item>
+        <item name="android:textColorPrimary">@color/text</item>
+        <item name="android:textColorSecondary">@color/text_dim</item>
+    </style>
+
+    <style name="Theme.XmRip.Dialog.Light" parent="android:Theme.Material.Light.Dialog.Alert">
+        <item name="android:colorAccent">@color/accent_light</item>
+        <item name="android:windowBackground">@drawable/dialog_bg_light</item>
+        <item name="android:textColorPrimary">@color/text_light</item>
+        <item name="android:textColorSecondary">@color/text_dim_light</item>
+    </style>
+
     <style name="Theme.XmRip.Transparent" parent="android:Theme.Translucent.NoTitleBar">
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsTranslucent">true</item>
