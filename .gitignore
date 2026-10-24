@@ -8,6 +8,11 @@ build/
 *.iml
 .vscode/
 
+# Appli PC (.NET) : sorties de build et exe publié
+/pc-app/bin/
+/pc-app/obj/
+/dist/
+
 # Kotlin (caches du compilateur)
 .kotlin/
 
@@ -46,3 +51,12 @@ signing.properties
 
 # Commandes locales ponctuelles
 *.local
+# Outil local de création de worktree
+setup-worktree.ps1
+
+# Suivi de travail local (inbox / plan d'étape) — pas des docs du repo
+A faire.txt
+PLAN.md
+
+# Copies de conflit Seafile
+*SFConflict*
