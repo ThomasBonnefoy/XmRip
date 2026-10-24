@@ -182,10 +182,18 @@ class MainActivity : Activity() {
         requestPermissionIfNeeded()
         phoneVolumePoller.post(phoneVolumeRunnable)
         batteryPoller.post(batteryRunnable)
+        HeadphoneClient.addListener(liveListener)
+        // Relance la surveillance si elle devait tourner (elle s'arrête après une mise à jour de l'app ou un arrêt forcé).
+        if (PcQuiet.watchNeeded(this)) runCatching { PcWatcher.start(this) }
+        if (GestureActions.anyEnabled(this)) runCatching { GestureWatcher.start(this) }
+        runCatching { refreshGestureCard() }
+        refreshPcQuiet()
+        refreshReader()
     }
 
     override fun onPause() {
         super.onPause()
+        HeadphoneClient.removeListener(liveListener)
         phoneVolumePoller.removeCallbacks(phoneVolumeRunnable)
         batteryPoller.removeCallbacks(batteryRunnable)
         runOnUiThread { deviceList.removeCallbacks(uuidScanRunnable) }
@@ -352,6 +360,7 @@ class MainActivity : Activity() {
             tab.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
         }
         pageScroll.scrollTo(0, 0)
+        autoLoadTried[index] = false
         loadCurrentTabIfNeeded()
     }
 
@@ -360,12 +369,50 @@ class MainActivity : Activity() {
      * occupée à ce moment, [showBattery] rappelle cette fonction dès la fin de la commande en cours.
      */
     private fun loadCurrentTabIfNeeded() {
-        if (selectedDevice == null || busy) return
+        if (selectedDevice == null || busy || autoLoadTried[currentTab]) return
+        // Une seule tentative automatique par ouverture d'onglet : si le casque ne répond pas, [showBattery] rappelle
+        // cette fonction après chaque commande et la lecture se relançait sans fin (une demande toutes les 3 s).
+        // Les boutons « Lire » et « Actualiser », eux, restent disponibles.
         when (currentTab) {
-            TAB_EQ -> if (!eqLoaded) runEqCmd("Lecture de l'égaliseur…") { it.readEq() }
-            TAB_SETTINGS -> if (!settingsLoaded) runSettingsCmd("Lecture des réglages…") { it.readSettings() }
-            TAB_DEVICES -> if (!devicesLoaded) runPairedCmd("Lecture des appareils…")
+            TAB_EQ -> if (!eqLoaded) {
+                autoLoadTried[currentTab] = true
+                runEqCmd("Lecture de l'égaliseur…") { it.readEq() }
+            }
+            TAB_SETTINGS -> if (!settingsLoaded) {
+                autoLoadTried[currentTab] = true
+                runSettingsCmd("Lecture des réglages…") { it.readSettings() }
+            }
+            TAB_DEVICES -> if (!devicesLoaded) {
+                autoLoadTried[currentTab] = true
+                runPairedCmd("Lecture des appareils…")
+            }
         }
+    }
+
+    private val autoLoadTried = BooleanArray(4)
+
+    /** Changements annoncés par le casque (voir [HeadphoneClient.listener]) : l'écran suit sans qu'on actualise. */
+    private val liveListener = object : MdrSession.StateListener {
+        override fun onReport(report: BatteryReport) {
+            runOnUiThread { if (!busy) showLiveReport(report) }
+        }
+
+        override fun onSettings(settings: SettingsState) {
+            runOnUiThread { if (!busy && settingsLoaded) showSettings(settings) }
+        }
+
+        override fun onDevices(info: PairedDevicesInfo) {
+            runOnUiThread { if (!busy && devicesLoaded) showPairedDevices(info) }
+        }    }
+
+    /** Met à jour batterie, bruit et volume sans toucher au reste de l'écran (message d'état, onglet chargé). */
+    private fun showLiveReport(report: BatteryReport) {
+        val charging = report.chargingStatus == MdrConstants.CHARGING_CHARGING
+        batteryBig.text = "${report.levelPercent} %" + if (charging) " ⚡" else ""
+        batteryBig.setTextColor(if (report.levelPercent <= 15 && !charging) kit.p.danger else kit.p.text)
+        report.musicVolume?.let { lastVolume = it.coerceIn(0, MdrConstants.PLAY_VOLUME_MAX) }
+        updateVolumeLabel()
+        updateNcAsmButtons(report)
     }
 
     // --- Onglet Son ------------------------------------------------------------------------
@@ -902,12 +949,17 @@ class MainActivity : Activity() {
     private lateinit var wearSwitch: Switch
     private lateinit var powerButtons: List<Button>
     private lateinit var powerSummary: TextView
+    private lateinit var ncButtonButtons: List<Button>
+    private lateinit var ncButtonSummary: TextView
     private var suppressSettings = false
     private var lastListening: ListeningMode = ListeningMode.STANDARD
     private var lastRoom = MdrConstants.ROOM_SMALL
 
     private val listeningModes = listOf(ListeningMode.STANDARD, ListeningMode.BGM, ListeningMode.CINEMA)
     private val rooms = listOf(MdrConstants.ROOM_SMALL, MdrConstants.ROOM_MIDDLE, MdrConstants.ROOM_LARGE)
+    private val ncButtonFunctions = listOf(
+        MdrConstants.NC_BUTTON_ALL, MdrConstants.NC_BUTTON_NC_ASM, MdrConstants.NC_BUTTON_NC_OFF, MdrConstants.NC_BUTTON_ASM_OFF,
+    )
 
     /** Réglages du casque : écoute, conversation, port du casque et alimentation. */
     private fun buildSettingsPage(): View {
@@ -923,7 +975,7 @@ class MainActivity : Activity() {
                 val mode = listeningModes[i]
                 runSettingsCmd("Mode d'écoute…") { s ->
                     s.setListeningMode(mode, lastRoom)
-                    s.readSettings()
+                    s.settings
                 }
             }
         }
@@ -936,7 +988,7 @@ class MainActivity : Activity() {
                 lastRoom = rooms[i]
                 runSettingsCmd("Taille de la pièce…") { s ->
                     s.setListeningMode(ListeningMode.BGM, rooms[i])
-                    s.readSettings()
+                    s.settings
                 }
             }
         }
@@ -951,7 +1003,7 @@ class MainActivity : Activity() {
         dseeSwitch = settingSwitch(listenCard, "DSEE Extreme", "Restitue les aigus perdus par la compression") { on ->
             runSettingsCmd("DSEE…") { s ->
                 s.setDsee(on)
-                s.readSettings()
+                s.settings
             }
         }
         page.addView(listenCard, kit.matchLp(bottom = 12))
@@ -960,16 +1012,36 @@ class MainActivity : Activity() {
         chatSwitch = settingSwitch(chatCard, "Speak-to-Chat", "Met la musique en pause quand tu parles") { on ->
             runSettingsCmd("Speak-to-Chat…") { s ->
                 s.setSpeakToChat(on)
-                s.readSettings()
+                s.settings
             }
         }
         wearSwitch = settingSwitch(chatCard, "Pause quand le casque est retiré", "La lecture reprend quand tu le remets") { on ->
             runSettingsCmd("Pause au retrait…") { s ->
                 s.setPauseWhenRemoved(on)
-                s.readSettings()
+                s.settings
             }
         }
         page.addView(chatCard, kit.matchLp(bottom = 12))
+
+        val buttonCard = kit.card("Bouton de bruit", "Modes que le bouton de l'oreillette gauche fait défiler.")
+        ncButtonSummary = kit.text("Bouton de bruit : non rapporté par le casque", 13f, secondary = true)
+        buttonCard.addView(ncButtonSummary, kit.matchLp(top = 10))
+        val (ncRowA, ncA) = kit.segmented(listOf("Les trois", "Bruit et ambiant"))
+        val (ncRowB, ncB) = kit.segmented(listOf("Bruit et normal", "Ambiant et normal"))
+        ncButtonButtons = ncA + ncB
+        ncButtonButtons.forEachIndexed { i, b ->
+            b.isEnabled = false
+            b.setOnClickListener {
+                runSettingsCmd("Bouton de bruit…") { s ->
+                    s.setNcButton(ncButtonFunctions[i])
+                    s.settings
+                }
+            }
+        }
+        buttonCard.addView(ncRowA, kit.matchLp(top = 4))
+        buttonCard.addView(ncRowB, kit.matchLp(top = 6))
+        page.addView(buttonCard, kit.matchLp(bottom = 12))
+        page.addView(buildGestureCard(), kit.matchLp(bottom = 12))
 
         val powerCard = kit.card("Alimentation")
         powerSummary = kit.text("Extinction automatique", 13f, secondary = true)
@@ -982,7 +1054,7 @@ class MainActivity : Activity() {
             b.setOnClickListener {
                 runSettingsCmd("Extinction automatique…") { s ->
                     s.setAutoPowerOff(elements[i])
-                    s.readSettings()
+                    s.settings
                 }
             }
         }
@@ -1003,6 +1075,107 @@ class MainActivity : Activity() {
         powerCard.addView(offButton, kit.matchLp(top = 14))
         page.addView(powerCard, kit.matchLp())
         return page
+    }
+
+    // --- Gestes du bouton de bruit -----------------------------------------------------------------
+
+    private lateinit var gestureButtons: Map<String, Button>
+    private lateinit var gestureNote: TextView
+    private lateinit var gestureOverlay: Button
+
+    /** Actions du téléphone sur le double et le triple appui du bouton de bruit (le casque annonce ces gestes). */
+    private fun buildGestureCard(): View {
+        val card = kit.card(
+            "Gestes du bouton de bruit",
+            "Choisis ce que fait le téléphone quand tu appuies deux ou trois fois de suite sur le bouton de bruit. " +
+                "Une action choisie garde la liaison avec le casque ouverte : l'appli Windows ne peut pas s'y " +
+                "connecter en même temps.",
+        )
+        val buttons = LinkedHashMap<String, Button>()
+        listOf(GestureActions.DOUBLE to "Double appui", GestureActions.TRIPLE to "Triple appui").forEach { (gesture, title) ->
+            card.addView(kit.text(title, 13f, secondary = true), kit.matchLp(top = 12))
+            val button = kit.actionButton("", 14f)
+            button.setOnClickListener { chooseGestureAction(gesture, title) }
+            card.addView(button, kit.matchLp(top = 4))
+            buttons[gesture] = button
+        }
+        gestureButtons = buttons
+        gestureNote = kit.text("", 12f, secondary = true)
+        card.addView(gestureNote, kit.matchLp(top = 12))
+        gestureOverlay = kit.actionButton("Autoriser l'ouverture d'applications", 13f)
+        gestureOverlay.setOnClickListener {
+            startActivity(
+                Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:$packageName"),
+                ),
+            )
+        }
+        card.addView(gestureOverlay, kit.matchLp(top = 8))
+        refreshGestureCard()
+        return card
+    }
+
+    private fun refreshGestureCard() {
+        gestureButtons.forEach { (gesture, button) -> button.text = GestureActions.label(this, gesture) }
+        val launches = gestureButtons.keys.any { GestureActions.action(this, it) == GestureActions.LAUNCH }
+        val blocked = launches && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !android.provider.Settings.canDrawOverlays(this)
+        gestureOverlay.visibility = if (blocked) View.VISIBLE else View.GONE
+        val note = GestureActions.note(this)
+        gestureNote.text = when {
+            note.isNotEmpty() -> "Dernier geste : $note"
+            GestureActions.anyEnabled(this) -> "En attente d'un geste. Garde l'accès aux notifications accordé à XmRip."
+            else -> "Aucune action choisie : la liaison n'est pas gardée ouverte."
+        }
+    }
+
+    private fun chooseGestureAction(gesture: String, title: String) {
+        val labels = arrayOf("Aucune action", "Lecture / pause", "Piste suivante", "Piste précédente", "Ouvrir une application…")
+        val actions = listOf(
+            GestureActions.NONE, GestureActions.PLAY_PAUSE, GestureActions.NEXT, GestureActions.PREVIOUS, GestureActions.LAUNCH,
+        )
+        val current = actions.indexOf(GestureActions.action(this, gesture)).coerceAtLeast(0)
+        android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setSingleChoiceItems(labels, current) { dialog, which ->
+                dialog.dismiss()
+                if (actions[which] == GestureActions.LAUNCH) {
+                    chooseGestureApp(gesture)
+                } else {
+                    applyGestureAction(gesture, actions[which], "")
+                }
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
+    private fun chooseGestureApp(gesture: String) {
+        Thread {
+            val apps = NotificationReader.launchableApps(this)
+            runOnUiThread {
+                val selected = apps.indexOfFirst { it.first == GestureActions.target(this, gesture) }
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("Application à ouvrir")
+                    .setSingleChoiceItems(apps.map { it.second }.toTypedArray(), selected) { dialog, which ->
+                        dialog.dismiss()
+                        applyGestureAction(gesture, GestureActions.LAUNCH, apps[which].first)
+                    }
+                    .setNegativeButton("Annuler", null)
+                    .show()
+            }
+        }.start()
+    }
+
+    private fun applyGestureAction(gesture: String, action: String, target: String) {
+        GestureActions.set(this, gesture, action, target)
+        GestureActions.setNote(this, "")
+        if (GestureActions.anyEnabled(this)) {
+            GestureWatcher.start(this)
+            GestureWatcher.retryNow()
+        } else {
+            GestureWatcher.stop(this)
+        }
+        refreshGestureCard()
     }
 
     /** Ligne « titre, explication, interrupteur » ajoutée à [card] ; [onChange] n'est appelé que par l'utilisateur. */
@@ -1075,6 +1248,19 @@ class MainActivity : Activity() {
         bindSwitch(dseeSwitch, state.dsee)
         bindSwitch(chatSwitch, state.speakToChat)
         bindSwitch(wearSwitch, state.pauseWhenRemoved)
+        val ncButton = state.ncButton
+        ncButtonButtons.forEachIndexed { i, b ->
+            b.isEnabled = ncButton != null
+            b.isSelected = ncButtonFunctions[i] == ncButton
+        }
+        ncButtonSummary.text = when (ncButton) {
+            null -> "Bouton de bruit : non rapporté par le casque"
+            MdrConstants.NC_BUTTON_ALL -> "Le bouton fait défiler : bruit, ambiant, normal"
+            MdrConstants.NC_BUTTON_NC_ASM -> "Le bouton alterne : bruit et ambiant"
+            MdrConstants.NC_BUTTON_NC_OFF -> "Le bouton alterne : bruit et normal (non essayé)"
+            MdrConstants.NC_BUTTON_ASM_OFF -> "Le bouton alterne : ambiant et normal (non essayé)"
+            else -> "Bouton de bruit : code 0x%02X inconnu".format(ncButton)
+        }
         val power = state.autoPowerOff
         powerButtons.forEach { it.isEnabled = power != null }
         powerButtons[0].isSelected = power == MdrConstants.AUTO_POWER_OFF_WHEN_REMOVED
@@ -1122,7 +1308,274 @@ class MainActivity : Activity() {
         pairedContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         card.addView(pairedContainer, kit.matchLp())
         page.addView(card, kit.matchLp())
+        page.addView(buildPcQuietCard(), kit.matchLp(top = 12))
+        page.addView(buildReaderCard(), kit.matchLp(top = 12))
         return page
+    }
+
+    // --- Lecture des notifications dans le casque ---------------------------------------------------
+
+    private lateinit var readerSwitch: Switch
+    private lateinit var readerContentSwitch: Switch
+    private lateinit var readerAsleepSwitch: Switch
+    private lateinit var readerApps: TextView
+    private lateinit var readerStatus: TextView
+    private lateinit var readerAccess: Button
+    private lateinit var readerModeButtons: List<Button>
+    private var suppressReader = false
+    private var readerSpeaker: NotificationReader.Speaker? = null
+
+    private fun buildReaderCard(): View {
+        val card = kit.card(
+            "Lecture des notifications",
+            "Le casque te lit à voix haute les notifications des applications que tu choisis, tant que ton " +
+                "ordinateur n'est pas connecté au casque. Le son habituel de la notification reste.",
+        )
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        row.addView(kit.text("Lire les notifications", 15f, bold = true), kit.lp(0, weight = 1f))
+        readerSwitch = Switch(this)
+        readerSwitch.setOnCheckedChangeListener { _, checked ->
+            if (suppressReader) return@setOnCheckedChangeListener
+            if (checked) enableReader() else disableReader()
+        }
+        row.addView(readerSwitch)
+        card.addView(row, kit.matchLp(top = 12))
+
+        readerApps = kit.text("", 13f, secondary = true)
+        card.addView(readerApps, kit.matchLp(top = 10))
+        val choose = kit.actionButton("Choisir les applications", 13f)
+        choose.setOnClickListener { chooseReaderApps(null) }
+        card.addView(choose, kit.matchLp(top = 8))
+
+        val contentRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        contentRow.addView(kit.text("Lire aussi le texte du message", 14f), kit.lp(0, weight = 1f))
+        readerContentSwitch = Switch(this)
+        readerContentSwitch.setOnCheckedChangeListener { _, checked ->
+            if (!suppressReader) NotificationReader.setReadsContent(this, checked)
+        }
+        contentRow.addView(readerContentSwitch)
+        card.addView(contentRow, kit.matchLp(top = 12))
+
+        val asleepRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        asleepRow.addView(kit.text("Seulement quand l'écran est éteint", 14f), kit.lp(0, weight = 1f))
+        readerAsleepSwitch = Switch(this)
+        readerAsleepSwitch.setOnCheckedChangeListener { _, checked ->
+            if (!suppressReader) NotificationReader.setOnlyWhenAsleep(this, checked)
+        }
+        asleepRow.addView(readerAsleepSwitch)
+        card.addView(asleepRow, kit.matchLp(top = 12))
+
+        card.addView(kit.text("Pendant la voix, la musique est…", 13f, secondary = true), kit.matchLp(top = 14))
+        val (modeRow, modeButtons) = kit.segmented(listOf("Baissée, voix plus forte", "Mise en pause"))
+        readerModeButtons = modeButtons
+        modeButtons[0].setOnClickListener {
+            NotificationReader.setMode(this, NotificationReader.MODE_LOUD)
+            refreshReader()
+        }
+        modeButtons[1].setOnClickListener {
+            NotificationReader.setMode(this, NotificationReader.MODE_PAUSE)
+            refreshReader()
+        }
+        card.addView(modeRow, kit.matchLp(top = 4))
+
+        readerStatus = kit.text("", 13f, secondary = true)
+        card.addView(readerStatus, kit.matchLp(top = 10))
+        readerAccess = kit.actionButton("Autoriser l'accès aux notifications", 13f)
+        readerAccess.setOnClickListener {
+            runCatching { startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+        }
+        card.addView(readerAccess, kit.matchLp(top = 8))
+        val test = kit.actionButton("Tester la voix", 13f)
+        test.setOnClickListener {
+            readerSpeaker?.shutdown()
+            readerSpeaker = NotificationReader.test(this)
+        }
+        card.addView(test, kit.matchLp(top = 8))
+        refreshReader()
+        return card
+    }
+
+    private fun refreshReader() {
+        if (!::readerSwitch.isInitialized) return
+        val enabled = NotificationReader.isEnabled(this)
+        suppressReader = true
+        readerSwitch.isChecked = enabled
+        readerContentSwitch.isChecked = NotificationReader.readsContent(this)
+        readerAsleepSwitch.isChecked = NotificationReader.onlyWhenAsleep(this)
+        suppressReader = false
+        val loud = NotificationReader.mode(this) == NotificationReader.MODE_LOUD
+        readerModeButtons[0].isSelected = loud
+        readerModeButtons[1].isSelected = !loud
+        val apps = NotificationReader.apps(this)
+        readerApps.text = if (apps.isEmpty()) "Applications lues : aucune" else "Applications lues : ${apps.size} choisie(s)"
+        val needsAccess = enabled && !NotificationReader.hasListenerAccess(this)
+        readerAccess.visibility = if (needsAccess) View.VISIBLE else View.GONE
+        val last = NotificationReader.lastDecision(this)
+        val lastLine = if (enabled && last != null) "\nDernière notification : $last" else ""
+        readerStatus.text = when {
+            !enabled -> "Désactivé : l'interrupteur « Lire les notifications » est éteint."
+            needsAccess -> "Autorise l'accès aux notifications pour XmRip, sinon rien ne peut être lu."
+            apps.isEmpty() -> "Choisis au moins une application."
+            PcQuiet.watchedAddress(this) == null -> "Ordinateur non choisi : les notifications sont lues même si le PC est connecté."
+            else -> (PcQuiet.note(this)?.takeIf { it.isNotBlank() } ?: "Actif.") + lastLine
+        }
+    }
+
+    private fun enableReader() {
+        NotificationReader.setEnabled(this, true)
+        if (NotificationReader.apps(this).isEmpty()) chooseReaderApps(null)
+        PcWatcher.start(this)
+        refreshReader()
+    }
+
+    private fun disableReader() {
+        NotificationReader.setEnabled(this, false)
+        PcWatcher.stop(this)
+        refreshReader()
+    }
+
+    /** Liste des applications du lanceur avec cases à cocher ; [then] est appelé une fois le choix validé. */
+    private fun chooseReaderApps(then: (() -> Unit)?) {
+        Thread {
+            val apps = NotificationReader.launchableApps(this)
+            runOnUiThread {
+                val chosen = NotificationReader.apps(this).toMutableSet()
+                val checked = BooleanArray(apps.size) { apps[it].first in chosen }
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("Applications à lire dans le casque")
+                    .setMultiChoiceItems(apps.map { it.second }.toTypedArray(), checked) { _, which, on ->
+                        if (on) chosen.add(apps[which].first) else chosen.remove(apps[which].first)
+                    }
+                    .setPositiveButton("Valider") { _, _ ->
+                        NotificationReader.setApps(this, chosen)
+                        // Choisir des applications, c'est vouloir la lecture : on allume l'interrupteur à ta place.
+                        if (chosen.isNotEmpty() && !NotificationReader.isEnabled(this)) {
+                            NotificationReader.setEnabled(this, true)
+                            PcWatcher.start(this)
+                        }
+                        refreshReader()
+                        then?.invoke()
+                    }
+                    .setNegativeButton("Annuler") { _, _ -> refreshReader() }
+                    .show()
+            }
+        }.start()
+    }
+
+    // --- Notifications silencieuses quand l'ordinateur est connecté au casque -----------------------
+
+    private lateinit var pcQuietSwitch: Switch
+    private lateinit var pcQuietDevice: TextView
+    private lateinit var pcQuietStatus: TextView
+    private lateinit var pcQuietAccess: Button
+    private var suppressPcQuiet = false
+
+    private fun buildPcQuietCard(): View {
+        val card = kit.card(
+            "Notifications et ordinateur",
+            "Coupe le son des notifications du téléphone tant que ton ordinateur est connecté au casque, pour " +
+                "qu'elles ne passent pas dans le casque pendant que tu écoutes le PC. Les vibrations et les " +
+                "pop-ups restent. Si c'est le téléphone qui lit du son dans le casque, les notifications passent. " +
+                "Garde l'accès aux notifications accordé à XmRip : c'est lui qui maintient la surveillance, sans " +
+                "notification permanente.",
+        )
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        row.addView(kit.text("Couper le son des notifications", 15f, bold = true), kit.lp(0, weight = 1f))
+        pcQuietSwitch = Switch(this)
+        pcQuietSwitch.setOnCheckedChangeListener { _, checked ->
+            if (suppressPcQuiet) return@setOnCheckedChangeListener
+            if (checked) enablePcQuiet() else disablePcQuiet()
+        }
+        row.addView(pcQuietSwitch)
+        card.addView(row, kit.matchLp(top = 12))
+
+        pcQuietDevice = kit.text("Ordinateur surveillé : aucun", 13f, secondary = true)
+        card.addView(pcQuietDevice, kit.matchLp(top = 10))
+        val choose = kit.actionButton("Choisir l'ordinateur", 13f)
+        choose.setOnClickListener { chooseWatchedDevice(null) }
+        card.addView(choose, kit.matchLp(top = 8))
+
+        pcQuietStatus = kit.text("", 13f, secondary = true)
+        card.addView(pcQuietStatus, kit.matchLp(top = 10))
+        pcQuietAccess = kit.actionButton("Autoriser « Ne pas déranger »", 13f)
+        pcQuietAccess.setOnClickListener { openPolicyAccessSettings() }
+        card.addView(pcQuietAccess, kit.matchLp(top = 8))
+        refreshPcQuiet()
+        return card
+    }
+
+    private fun refreshPcQuiet() {
+        if (!::pcQuietSwitch.isInitialized) return
+        val enabled = PcQuiet.isEnabled(this)
+        suppressPcQuiet = true
+        pcQuietSwitch.isChecked = enabled
+        suppressPcQuiet = false
+        pcQuietDevice.text = "Ordinateur surveillé : " + (PcQuiet.watchedName(this) ?: "aucun")
+        // Sur certains téléphones, Android n'autorise le changement de ce volume qu'avec l'accès « Ne pas déranger ».
+        val needsAccess = enabled && PcQuiet.accessNeeded(this)
+        pcQuietAccess.visibility = if (needsAccess) View.VISIBLE else View.GONE
+        pcQuietStatus.text = when {
+            !enabled -> "Désactivé."
+            needsAccess -> "Android demande l'accès « Ne pas déranger » pour changer ce volume : autorise XmRip."
+            else -> PcQuiet.note(this)?.takeIf { it.isNotBlank() } ?: "Surveillance en cours…"
+        }
+    }
+
+    private fun enablePcQuiet() {
+        if (PcQuiet.watchedAddress(this) == null) {
+            chooseWatchedDevice { enablePcQuiet() }
+            return
+        }
+        PcQuiet.setEnabled(this, true)
+        PcWatcher.start(this)
+        refreshPcQuiet()
+    }
+
+    private fun disablePcQuiet() {
+        PcQuiet.setEnabled(this, false)
+        PcQuiet.setSilent(this, false) // volume des notifications rétabli tout de suite
+        PcWatcher.stop(this)
+        refreshPcQuiet()
+    }
+
+    private fun openPolicyAccessSettings() {
+        runCatching { startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
+            .onFailure { setStatus("Ouvre Réglages, Notifications, « Ne pas déranger », puis autorise XmRip.") }
+    }
+
+    /** Liste des appareils connus du casque (hors ce téléphone) ; [then] est appelé une fois le choix fait. */
+    private fun chooseWatchedDevice(then: (() -> Unit)?) {
+        val phoneName = phoneBluetoothName()
+        val candidates = lastPaired.filter { phoneName == null || it.name != phoneName }
+        if (candidates.isEmpty()) {
+            setStatus("Charge d'abord la liste des appareils (Actualiser), puis réessaie.")
+            refreshPcQuiet()
+            return
+        }
+        val labels = candidates.map { it.name.ifBlank { it.address } + if (it.connected) "  ·  connecté" else "" }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Quel appareil est ton ordinateur ?")
+            .setItems(labels.toTypedArray()) { _, which ->
+                val chosen = candidates[which]
+                PcQuiet.setWatched(this, chosen.address, chosen.name.ifBlank { chosen.address })
+                refreshPcQuiet()
+                then?.invoke()
+            }
+            .setNegativeButton("Annuler") { _, _ -> refreshPcQuiet() }
+            .setOnCancelListener { refreshPcQuiet() }
+            .show()
     }
 
     /**

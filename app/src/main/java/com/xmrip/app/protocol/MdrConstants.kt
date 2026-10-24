@@ -34,6 +34,9 @@ object MdrConstants {
     const val CMD_POWER_RET_STATUS = 0x23
     const val CMD_POWER_NTFY_STATUS = 0x25
 
+    /** Journal d'événements du casque : LOG_SET_STATUS l'active, LOG_NTFY_PARAM porte les noms de gestes (texte). */
+    const val CMD_LOG_SET_STATUS = 0xC4
+    const val CMD_LOG_NTFY_PARAM = 0xC9
     const val CMD_NCASM_GET_PARAM = 0x66
     const val CMD_NCASM_RET_PARAM = 0x67
     const val CMD_NCASM_SET_PARAM = 0x68
@@ -158,6 +161,9 @@ object MdrConstants {
     /** Attente de la notification après l'écriture d'un réglage (onglet Réglages) ; elle ne vient pas toujours. */
     const val SETTING_REPLY_WAIT_MS = 1500L
 
+    /** Attente maximale des notifications qui confirment un réglage écrit, avant de le relire explicitement. */
+    const val SETTING_CONFIRM_WAIT_MS = 1200L
+
     /**
      * Attente de la réponse à une lecture. Après un changement de mode d'écoute, le casque envoie une rafale
      * de notifications spontanées qui retarde ses réponses de plus d'une seconde.
@@ -188,7 +194,6 @@ object MdrConstants {
     const val UPSCALING_AUTO = 0x01
 
     /** SystemInquiredType. */
-    const val SYSTEM_TYPE_ASSIGNABLE_SETTINGS = 0x03
     const val SYSTEM_TYPE_SMART_TALKING_MODE_TYPE2 = 0x0C
 
     /** DetectSensitivity (Speak-to-Chat). */
@@ -202,17 +207,46 @@ object MdrConstants {
     const val STC_OFF_TIME_SLOW = 0x02
     const val STC_OFF_TIME_NONE = 0x03
 
-    /** AssignableSettings Preset. */
-    const val ASSIGN_AMBIENT_SOUND_CONTROL = 0x00
-    const val ASSIGN_VOLUME_CONTROL = 0x10
-    const val ASSIGN_PLAYBACK_CONTROL = 0x20
-    const val ASSIGN_TRACK_CONTROL = 0x21
-    const val ASSIGN_QUICK_ACCESS = 0x36
+    /**
+     * Réglages de Speak-to-Chat (sensibilité, délai) : `FA 0C` → `FB 0C <s> <t>`, écriture `FC 0C <s> <t>` →
+     * `FD 0C <s> <t>`. Essayé sur le XM6 (3.1.5) le 2026-10-24 : le délai change ; la sensibilité n'a changé qu'une
+     * fois (auto → haute) puis a ignoré les écritures suivantes, elle n'est donc que lue.
+     */
+    const val CMD_SYSTEM_GET_EXT_PARAM = 0xFA
+
+    /**
+     * Priorité qualité / connexion (AudioInquiredType CONNECTION_MODE) : `E6 00` → `E7 00 <v>`, écriture `E8 00 <v>`.
+     * Après l'écriture le casque notifie `E9 05 …` (pas `E9 00`), il faut donc relire. Essayé sur le XM6 le 2026-10-24.
+     */
+    const val AUDIO_TYPE_CONNECTION_MODE = 0x00
+    const val PRIORITY_SOUND_QUALITY = 0x00
+    const val PRIORITY_CONNECTION = 0x01
+
+    /**
+     * Guidage vocal (table 2) : `46 01` → `47 01 <v> <langue>` (v : 0 = activé), écriture `48 01 <v>` → `49 01 <v>` ;
+     * volume `46 20` → `47 20 <v>` (signé, -2 à +2), écriture `48 20 <v> <bip>` → `49 20 <v>` (bip 1 = sans bip de
+     * confirmation). Lecture, écriture, relecture et retour à la valeur d'origine essayés sur le XM6 le 2026-10-24.
+     */
+    const val CMD_VOICE_GUIDANCE_GET_PARAM = 0x46
+    const val CMD_VOICE_GUIDANCE_RET_PARAM = 0x47
+    const val CMD_VOICE_GUIDANCE_SET_PARAM = 0x48
+    const val CMD_VOICE_GUIDANCE_NTFY_PARAM = 0x49
+    const val VOICE_GUIDANCE_TYPE_ON_OFF = 0x01
+    const val VOICE_GUIDANCE_TYPE_VOLUME = 0x20
+    const val VOICE_GUIDANCE_VOLUME_MIN = -2
+    const val VOICE_GUIDANCE_VOLUME_MAX = 2
 
     /** NcAsmInquiredType. */
     const val NCASM_TYPE_DUAL_NC_ASM = 0x17
     const val NCASM_TYPE_DUAL_NC_ASM_NA = 0x19 // XM6 : gestion auto du son ambiant
     const val NCASM_TYPE_ASM_SEAMLESS = 0x22
+    const val NCASM_TYPE_BUTTON = 0x30 // NC_AMB_TOGGLE : modes que le bouton de bruit fait défiler
+
+    /** Function du bouton de bruit (NC_AMB_TOGGLE) ; 0x01 et 0x02 vérifiés sur un WH-1000XM6, 0x03 et 0x04 non essayés. */
+    const val NC_BUTTON_ALL = 0x01 // bruit, ambiant, désactivé
+    const val NC_BUTTON_NC_ASM = 0x02 // bruit et ambiant
+    const val NC_BUTTON_NC_OFF = 0x03 // bruit et désactivé
+    const val NC_BUTTON_ASM_OFF = 0x04 // ambiant et désactivé
 
     /** NcAsmOnOffValue. */
     const val NCASM_VALUE_OFF = 0
