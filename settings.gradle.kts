@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "XmRip"
 include(":app")
+include(":desktop")
