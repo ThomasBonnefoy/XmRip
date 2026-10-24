@@ -8,6 +8,19 @@ App Android open-source qui remplace **Sony Sound Connect** pour contrôler le c
 - Le protocole **MDR v2** repose sur des trames `0x3E / 0x3C`, avec échappement `0x3D`, checksum et acquittement (`ACK`) de chaque trame de données.
 - Le handshake se limite à firmware, modèle et état (batterie, bruit, volume) ; la liaison reste ouverte entre deux actions (fermée après 90 s d'inactivité, ou gardée tant qu'une action de geste est choisie). L'état suit les notifications du casque.
 
+## Interface (0.3.0)
+
+Thème clair ou sombre (Réglages → Apparence, par défaut comme le téléphone), dessiné en code, dont la lueur de fond suit le mode de bruit. Quatre pages, qu'on passe en glissant ou par la barre d'onglets flottante :
+
+- **Accueil** : casque dessiné et animé dans l'anneau de batterie (ondes qui arrivent en réduction de bruit, qui partent en ambiant), autonomie estimée, grande carte du mode de bruit (appui = mode suivant, glisser = précédent / suivant), niveau ambiant, raccourcis Speak-to-Chat / DSEE / pause au retrait, lecture en cours (pochette, progression) et volume.
+- **Son** : préréglages en tuiles, égaliseur 10 bandes à faire glisser sur « Perso », mode d'écoute, DSEE, priorité qualité / connexion.
+- **Appareils** : multipoint, son des notifications coupé quand l'ordinateur est connecté, lecture des notifications (applications choisies avec icônes et recherche, choix de la voix : les voix Google « en ligne », plus naturelles, quand internet est là).
+- **Réglages** : apparence, Speak-to-Chat et délai de reprise, pause au retrait, guidage vocal, bouton de bruit, gestes, extinction, journal des échanges, ajout de la tuile et du widget, à propos.
+
+Hors de l'app : **tuile des réglages rapides** (mode et batterie, appui = mode suivant), **widget** d'écran d'accueil (batterie, mode, trois boutons) et trois **raccourcis** sur l'icône. Ils ne tentent rien si le casque n'est pas connecté au téléphone. Les raccourcis sont publiés par le code (`Shortcuts.kt`) et non par le manifeste : Android lance ceux du manifeste avec `FLAG_ACTIVITY_TASK_ON_HOME`, et une routine Samsung qui les déclenchait renvoyait à l'écran d'accueil.
+
+Les commandes passent dans une file (aucune action perdue) et l'écran affiche l'état attendu tout de suite, corrigé par la réponse du casque. L'illustration du casque est dessinée : les visuels de Sony sont protégés.
+
 ## Source de vérité du protocole
 
 Le code Kotlin de `app/` est un **port** du protocole MDR, pas une traduction du client desktop.
@@ -68,6 +81,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 | Gestes du casque : le casque annonce glissés, double appui, main posée, double et triple appui du bouton de bruit (journal d'événements, `C4 01 00`) | ✔ (vérifié sur un WH-1000XM6) ; l'appui simple de la zone tactile n'envoie rien |
 | Actions du téléphone sur le double et le triple appui du bouton de bruit (touches média, ouvrir une application ; garde la session ouverte) | ✔ (vérifié sur un WH-1000XM6) |
 | Réglages de la zone tactile de droite (glissés, double tap, main posée) | aucune commande trouvée |
+| Guidage vocal : marche / arrêt et volume (-2 à +2), table 2 `46`/`48` | ✔ (écrit, relu et remis sur un WH-1000XM6 le 2026-10-24 via le banc PC) |
+| Priorité qualité du son / connexion stable (`E6 00` / `E8 00`) | ✔ (idem) |
+| Speak-to-Chat : délai de reprise (`FA 0C` / `FC 0C`) ; sensibilité affichée seulement | ✔ délai (idem) ; la sensibilité n'accepte pas les écritures de façon fiable |
+| Tuile des réglages rapides, widget d'écran d'accueil, journal des échanges | installés, à valider sur le téléphone |
+| Pression sonore (table 2 `5A`) | non branchée : réponses incohérentes (`00` « hors plage ») |
 
 La vérification se fait sur le casque réel — aucune suite de tests automatisés pour l'instant.
 
