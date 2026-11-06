@@ -9,10 +9,11 @@ import java.io.OutputStream
 /**
  * Faux casque pour tester [com.xmrip.app.protocol.MdrSession] sans Bluetooth : on branche [input] et [output] sur la
  * session, et chaque commande reçue est acquittée puis reçoit la réponse de [replies] (comme les trames relevées sur un
- * WH-1000XM6 : l'acquittement porte la séquence inverse, la réponse garde celle de la commande). Une commande sans
- * réponse prévue reste muette, ce qui simule un casque qui ne la connaît pas.
+ * WH-1000XM6 : l'acquittement porte la séquence inverse, la réponse garde celle de la commande). Une écriture (`x8`)
+ * sans réponse prévue est renvoyée en notification (`x9`, même contenu), comme le casque confirme un réglage, si
+ * [echoWrites] ; toute autre commande sans réponse prévue reste muette, ce qui simule un casque qui ne la connaît pas.
  */
-class FakeHeadset(private val replies: Map<List<Int>, ByteArray>) {
+class FakeHeadset(private val replies: Map<List<Int>, ByteArray>, private val echoWrites: Boolean = true) {
     /** Charges utiles reçues, dans l'ordre. */
     val requests = ArrayList<List<Int>>()
 
@@ -38,7 +39,10 @@ class FakeHeadset(private val replies: Map<List<Int>, ByteArray>) {
                 val request = frame.payload.map { it.toInt() and 0xFF }
                 requests.add(request)
                 send(MdrFramer.pack(MdrConstants.TYPE_ACK, (1 - frame.seq) and 0xFF, ByteArray(0)))
-                val answer = replies.entries.firstOrNull { request.take(it.key.size) == it.key }?.value ?: continue
+                val answer = replies.entries.firstOrNull { request.take(it.key.size) == it.key }?.value
+                    ?: frame.payload.takeIf { echoWrites && it.isNotEmpty() && (it[0].toInt() and 0x0F) == 0x08 }
+                        ?.copyOf()?.also { it[0] = (it[0] + 1).toByte() }
+                    ?: continue
                 send(MdrFramer.pack(MdrConstants.TYPE_DATA_MDR, frame.seq, answer))
             }
         }

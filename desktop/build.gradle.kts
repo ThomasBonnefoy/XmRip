@@ -44,3 +44,9 @@ tasks.register<JavaExec>("runWeb") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass = "com.xmrip.desktop.WebKt"
 }
+
+// Faux casque servi en TCP (src/test/…/FakeBridge.kt) : essayer le banc et l'app macOS sans casque.
+tasks.register<JavaExec>("runFakeHeadset") {
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.xmrip.desktop.FakeBridgeKt"
+}

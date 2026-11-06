@@ -20,6 +20,23 @@ struct HeadsetState: Decodable {
     let ambient: Int?
     let autoAmbient: Bool?
     let volume: Int?
+    /// Code couleur annoncé par le casque, et la photo qui lui correspond (black, silver, blue, pink, olive, sand).
+    let color: Int?
+    let look: String?
+}
+
+/// Photos du casque copiées dans l'app par build.sh (les mêmes que l'app Android), chargées une fois chacune.
+@MainActor
+enum HeadsetPhoto {
+    private static var cache: [String: NSImage] = [:]
+
+    static func image(_ look: String) -> NSImage? {
+        if let image = cache[look] { return image }
+        guard let url = Bundle.main.url(forResource: "headphones_\(look)", withExtension: "webp"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        cache[look] = image
+        return image
+    }
 }
 
 struct SettingsInfo: Decodable {
@@ -87,6 +104,8 @@ final class Model: ObservableObject {
     @Published var ambientLevel = 10.0
     @Published var volume = 10.0
     @Published var logLines: [String] = []
+    /// Photo du casque : la dernière connue est gardée d'un lancement à l'autre, pour l'afficher avant la première réponse.
+    @Published var look = UserDefaults.standard.string(forKey: "look") ?? "black"
     private var volumeBeforeMute = 10
 
     private var backend: Process?
@@ -188,7 +207,12 @@ final class Model: ObservableObject {
             let reply = try JSONDecoder().decode(ApiReply.self, from: data)
             if let s = reply.state {
                 state = s
-                if let a = s.ambient { ambientLevel = Double(a) }
+                if let l = s.look, l != look {
+                    look = l
+                    UserDefaults.standard.set(l, forKey: "look")
+                }
+                // Hors ambiant, le niveau annoncé vaut 0 : le garder ferait repartir « ambient 0 » (plage 1 à 20).
+                if s.ncKind == "ambient", let a = s.ambient, a >= 1 { ambientLevel = Double(a) }
                 if let v = s.volume {
                     volume = Double(v)
                     if v > 0 { volumeBeforeMute = v }
@@ -370,6 +394,7 @@ struct Controls: View {
 
     private var home: some View {
         Group {
+            HeadsetHero(look: model.look, state: model.state)
             GroupBox("Contrôle du bruit") {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("", selection: ncBinding) {
@@ -648,7 +673,14 @@ struct Controls: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            Image(systemName: "headphones").font(.title).foregroundStyle(.tint)
+            Group {
+                if let image = HeadsetPhoto.image(model.look) {
+                    Image(nsImage: image).resizable().interpolation(.high).scaledToFit()
+                } else {
+                    Image(systemName: "headphones").resizable().scaledToFit().foregroundStyle(.tint)
+                }
+            }
+            .frame(width: 30, height: 36)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.state?.model ?? "Casque").font(.headline)
                 if let s = model.state {
@@ -659,6 +691,93 @@ struct Controls: View {
             Spacer()
             Button { run("battery eq settings", note: nil) } label: { Image(systemName: "arrow.clockwise") }
                 .help("Actualiser")
+        }
+    }
+}
+
+/// En tête de l'accueil : la photo du casque à sa couleur dans l'anneau de batterie (270°, ouvert en bas, comme l'app
+/// Android), avec une lueur qui suit le mode de bruit.
+struct HeadsetHero: View {
+    let look: String
+    let state: HeadsetState?
+
+    private var level: Int? { state?.battery }
+    private var charging: Bool { state?.charging == "en charge" }
+
+    /// Mêmes seuils que l'app Android ; violet fixe (son ACCENT) plutôt que la couleur d'accentuation du Mac, qui peut
+    /// être rouge et ferait croire à une batterie faible.
+    private var ringColor: Color {
+        guard let level else { return .secondary }
+        if charging { return .green }
+        if level <= 15 { return .red }
+        if level <= 30 { return .orange }
+        return Color(red: 0x6F / 255, green: 0x5B / 255, blue: 1)
+    }
+
+    private var glow: Color {
+        switch state?.ncKind {
+        case "nc": return .indigo
+        case "ambient": return .teal
+        default: return .gray
+        }
+    }
+
+    private var modeText: String {
+        switch state?.ncKind {
+        case "nc": return "Réduction de bruit"
+        case "ambient": return state?.autoAmbient == true ? "Ambiant automatique" : "Ambiant · niveau \(state?.ambient ?? 0)"
+        case "off": return "Contrôle du bruit désactivé"
+        default: return state == nil ? "Lecture de l'état…" : "Mode inconnu"
+        }
+    }
+
+    private var chargeText: String {
+        switch state?.charging {
+        case "en charge": return "En charge"
+        case "chargée": return "Chargée"
+        case nil: return "Batterie"
+        default: return "Sur batterie"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 22) {
+            ZStack {
+                Circle().fill(RadialGradient(colors: [glow.opacity(0.25), glow.opacity(0)], center: .center,
+                                             startRadius: 0, endRadius: 92))
+                Circle().trim(from: 0, to: 0.75)
+                    .stroke(Color.secondary.opacity(0.2), style: StrokeStyle(lineWidth: 9, lineCap: .round))
+                    .rotationEffect(.degrees(135))
+                Circle().trim(from: 0, to: 0.75 * CGFloat(level ?? 0) / 100)
+                    .stroke(ringColor, style: StrokeStyle(lineWidth: 9, lineCap: .round))
+                    .rotationEffect(.degrees(135))
+                Group {
+                    if let image = HeadsetPhoto.image(look) {
+                        Image(nsImage: image).resizable().interpolation(.high).scaledToFit()
+                    } else {
+                        Image(systemName: "headphones").resizable().scaledToFit().foregroundStyle(.secondary).padding(24)
+                    }
+                }
+                .frame(height: 128)
+                .opacity(state == nil ? 0.5 : 1)
+            }
+            .frame(width: 172, height: 172)
+            .padding(6)
+            .animation(.easeOut(duration: 0.5), value: level)
+            .animation(.easeInOut(duration: 0.3), value: look)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(level.map { "\($0) %" } ?? "– %")
+                    .font(.system(size: 40, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                Label(chargeText, systemImage: charging ? "bolt.fill" : "battery.75percent")
+                    .foregroundStyle(.secondary)
+                Text(modeText)
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(glow.opacity(0.16)))
+            }
+            Spacer(minLength: 0)
         }
     }
 }
