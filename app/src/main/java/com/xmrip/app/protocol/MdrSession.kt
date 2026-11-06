@@ -14,6 +14,8 @@ data class BatteryReport(
     val chargingStatus: Int,
     val ncAsm: NcAsmState? = null,
     val musicVolume: Int? = null,
+    /** ModelColor du casque (`MdrConstants.MODEL_COLOR_*`) ; null si le casque ne l'a pas annoncée. */
+    val modelColor: Int? = null,
 ) {
     val chargingLabel: String
         get() = when (chargingStatus) {
@@ -160,6 +162,8 @@ class MdrSession(
         private set
     var firmwareVersion: String? = null
         private set
+    var modelColor: Int? = null
+        private set
     private var batteryLevel: Int? = null
     private var batteryCharging: Int = MdrConstants.CHARGING_UNKNOWN
     private var knownNcAsm: NcAsmState? = null
@@ -175,13 +179,14 @@ class MdrSession(
 
     /** Rapport construit depuis les dernières valeurs connues, sans aucun échange ; null avant la batterie. */
     val report: BatteryReport?
-        get() = batteryLevel?.let { BatteryReport(modelName, firmwareVersion, it, batteryCharging, knownNcAsm, knownVolume) }
+        get() = batteryLevel?.let { BatteryReport(modelName, firmwareVersion, it, batteryCharging, knownNcAsm, knownVolume, modelColor) }
 
     companion object {
         const val MODE_NC = 0
         const val MODE_AMBIENT = 1
         const val MODE_OFF = 2
         private const val LOG_TAG = "XmRip-MDR"
+        private const val COLOR_TIMEOUT_MS = 1500L
     }
 
     /**
@@ -201,6 +206,7 @@ class MdrSession(
         if (modelName == null) {
             modelName = readDeviceInfoString(requestDeviceInfo(MdrConstants.DEVICE_INFO_MODEL_NAME, deadline, "model name"))
         }
+        if (modelColor == null) modelColor = readModelColor()
 
         sendCommand(
             byteArrayOf(
@@ -232,10 +238,23 @@ class MdrSession(
         return report!!
     }
 
-    /** Retient un modèle et un firmware déjà connus (d'une session précédente), pour ne pas les redemander au casque. */
-    fun seedDeviceInfo(model: String?, firmware: String?) {
+    /** Retient un modèle, un firmware et une couleur déjà connus (d'une session précédente), pour ne pas les redemander. */
+    fun seedDeviceInfo(model: String?, firmware: String?, color: Int? = null) {
         if (modelName == null) modelName = model
         if (firmwareVersion == null) firmwareVersion = firmware
+        if (modelColor == null) modelColor = color
+    }
+
+    /**
+     * Couleur du casque (« série et couleur »), pour afficher la bonne photo. Attente courte et sans conséquence : si
+     * le casque ne répond pas, la couleur reste inconnue et le handshake continue.
+     */
+    private fun readModelColor(): Int? = try {
+        val ret = requestDeviceInfo(MdrConstants.DEVICE_INFO_SERIES_AND_COLOR, System.currentTimeMillis() + COLOR_TIMEOUT_MS, "model color")
+        Log.d(LOG_TAG, "Série et couleur : ${ret.toHex()}")
+        if (ret.size >= 4) ret[3].toInt() and 0xFF else null
+    } catch (_: Exception) {
+        null
     }
 
     /**

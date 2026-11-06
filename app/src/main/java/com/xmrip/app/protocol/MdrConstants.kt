@@ -276,6 +276,20 @@ object MdrConstants {
     const val DEVICE_INFO_FW_VERSION = 0x02
     const val DEVICE_INFO_SERIES_AND_COLOR = 0x03
 
+    /** ModelColor (réponse « série et couleur » : [0x05, 0x03, série, couleur]). */
+    const val MODEL_COLOR_BLACK = 1
+    const val MODEL_COLOR_YELLOW = 7
+    const val MODEL_COLOR_GREEN = 8
+    const val MODEL_COLOR_GOLD = 10
+    const val MODEL_COLOR_ORANGE = 12
+    const val MODEL_COLOR_BROWN = 13
+    const val MODEL_COLOR_WHITE = 2
+    const val MODEL_COLOR_SILVER = 3
+    const val MODEL_COLOR_BLUE = 5
+    const val MODEL_COLOR_PINK = 6
+    const val MODEL_COLOR_GRAY = 9
+    const val MODEL_COLOR_CREAM = 11
+
     /** PowerInquiredType. */
     const val POWER_BATTERY = 0x00
     const val POWER_LEFT_RIGHT_BATTERY = 0x01

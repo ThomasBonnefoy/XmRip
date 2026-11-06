@@ -434,6 +434,7 @@ class HomePage(private val activity: MainActivity, private val ui: Ui, private v
         title.text = ctrl.deviceName.takeIf { ctrl.device != null || cache.name == null } ?: cache.name ?: "XmRip"
         val level = r?.levelPercent ?: cache.battery
         val charging = if (r != null) r.chargingStatus == MdrConstants.CHARGING_CHARGING else cache.charging
+        hero.setColor(r?.modelColor ?: cache.color)
         hero.setBattery(level, charging)
         hero.alpha = if (r == null && cache.battery != null) 0.6f else 1f
         hero.setConnecting(ctrl.conn is Conn.Connecting || ctrl.conn == Conn.Searching)
