@@ -22,6 +22,14 @@ kotlin {
     }
 }
 
+dependencies {
+    testImplementation(kotlin("test"))
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+
 application {
     mainClass = "com.xmrip.desktop.MainKt"
 }
