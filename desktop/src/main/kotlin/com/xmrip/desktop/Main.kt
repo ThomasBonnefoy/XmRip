@@ -11,7 +11,7 @@ import kotlin.system.exitProcess
 
 private const val USAGE = """Banc de test PC XmRip : MdrSession (code de l'app) via le pont RFCOMM.
 
-Lancer d'abord le pont :  tools\pc-bridge\run.ps1
+Lancer d'abord le pont :  tools/pc-bridge/run.sh (macOS)  ou  tools\pc-bridge\run.ps1 (Windows)
 Puis :  gradlew :desktop:run --args="[options] commande [commande ...]"
 
 Options : --host H (127.0.0.1)   --port P (9876)   -v (affiche les trames TX/RX)
@@ -28,9 +28,17 @@ Commandes (enchaînées dans une seule session) :
   priority quality|connection   priorité qualité du son / stabilité de la connexion
   chat-delay N       délai de reprise de Speak-to-Chat (0 court, 1 standard, 2 long, 3 jamais)
   eq                 lit l'égaliseur
-  eq-preset NOM      heavy | clear | hard | soft | off
+  eq-preset NOM      heavy | clear | hard | soft | custom | off
   eq-bands G1..G10   courbe personnalisée, 10 gains de -6 à 6 dB (graves en premier)
   devices            appareils appairés (multipoint)
+  chat on|off        Speak-to-Chat
+  dsee on|off        DSEE Extreme
+  wear on|off        pause quand on retire le casque
+  nc-button N        modes du bouton de bruit : 1 les trois, 2 bruit+ambiant, 3 bruit+désactivé, 4 ambiant+désactivé
+  auto-off removed|never   extinction automatique (au retrait du casque / jamais)
+  power-off          éteint le casque
+  pairing on|off     mode d'appairage
+  connect|disconnect|unpair|switch ADRESSE   appareil multipoint : connecter, déconnecter, oublier, lire sur celui-ci
   guide [n ...]      test guidé des gestes (zone tactile, bouton de bruit) avec compte à rebours ; résultat dans guide.txt
   watch [secondes]   écoute passive : affiche tout ce que le casque envoie (20 s par défaut)
   raw HEX [t2]       commande brute en hexadécimal sans espaces (ex. raw F603), attend 2 s, affiche les réponses ;
@@ -64,7 +72,7 @@ fun main(args: Array<String>) {
         val socket = try {
             Socket().apply { connect(InetSocketAddress(host, port), 3_000) }
         } catch (e: Exception) {
-            System.err.println("Pont injoignable sur $host:$port (${e.message}). Lance tools\\pc-bridge\\run.ps1")
+            System.err.println("Pont injoignable sur $host:$port (${e.message}). Lance tools/pc-bridge/run.sh (macOS) ou run.ps1 (Windows)")
             exitProcess(2)
         }
         try {
@@ -96,6 +104,13 @@ fun main(args: Array<String>) {
             Thread.sleep(1_000)
         }
     }
+}
+
+/** Dossier de travail du banc, hors du dépôt : %LOCALAPPDATA%\xmrip-bridge (Windows) ou ~/Library/Caches/xmrip-bridge (macOS). */
+private fun bridgeDir(): java.io.File {
+    val local = System.getenv("LOCALAPPDATA")
+    val home = System.getProperty("user.home") ?: "."
+    return if (local != null) java.io.File(local, "xmrip-bridge") else java.io.File(home, "Library/Caches/xmrip-bridge")
 }
 
 private data class GuideStep(val name: String, val instruction: String, val seconds: Int)
@@ -171,15 +186,15 @@ private fun runGuide(session: MdrSession, steps: List<GuideStep>) {
     }
     beep()
     say()
-    say("Terminé. Tu peux enlever le casque. Résultat enregistré dans %LOCALAPPDATA%\\xmrip-bridge\\guide.txt")
+    say("Terminé. Tu peux enlever le casque. Résultat enregistré dans ${bridgeDir()}${java.io.File.separator}guide.txt")
     runCatching {
-        val dir = java.io.File(System.getenv("LOCALAPPDATA") ?: ".", "xmrip-bridge")
+        val dir = bridgeDir()
         dir.mkdirs()
         java.io.File(dir, "guide.txt").writeText(report.toString(), Charsets.UTF_8)
     }
 }
 
-private fun run(session: MdrSession, rest: ArrayDeque<String>) {
+internal fun run(session: MdrSession, rest: ArrayDeque<String>) {
     fun optInt(): Int? = rest.firstOrNull()?.toIntOrNull()?.also { rest.removeFirst() }
     when (val cmd = rest.removeFirst()) {
         "battery" -> Unit
@@ -222,6 +237,7 @@ private fun run(session: MdrSession, rest: ArrayDeque<String>) {
                 "clear" -> MdrConstants.EQ_XM6_CLEAR
                 "hard" -> MdrConstants.EQ_XM6_HARD
                 "soft" -> MdrConstants.EQ_XM6_SOFT
+                "custom" -> MdrConstants.EQ_XM6_CUSTOM
                 "off" -> MdrConstants.EQ_OFF
                 else -> error("Préréglage inconnu : $name")
             }
@@ -259,6 +275,20 @@ private fun run(session: MdrSession, rest: ArrayDeque<String>) {
                 }
             }
         }
+        "chat" -> println(session.setSpeakToChat(rest.removeFirst() == "on").let { "Speak-to-Chat ${it.speakToChat}" })
+        "dsee" -> println(session.setDsee(rest.removeFirst() == "on").let { "DSEE ${it.dsee}" })
+        "wear" -> println(session.setPauseWhenRemoved(rest.removeFirst() == "on").let { "Pause au retrait ${it.pauseWhenRemoved}" })
+        "nc-button" -> println(session.setNcButton(rest.removeFirst().toInt()).let { "Bouton de bruit ${it.ncButton}" })
+        "auto-off" -> {
+            val element = if (rest.removeFirst() == "never") MdrConstants.AUTO_POWER_OFF_DISABLE else MdrConstants.AUTO_POWER_OFF_WHEN_REMOVED
+            println("Extinction automatique ${session.setAutoPowerOff(element).autoPowerOff}")
+        }
+        "power-off" -> { session.powerOff(); println("Casque éteint") }
+        "pairing" -> { session.setPairingMode(rest.removeFirst() == "on"); println("Mode d'appairage envoyé") }
+        "connect" -> println("Résultat 0x%02X".format(session.connectPairedDevice(rest.removeFirst())))
+        "disconnect" -> println("Résultat 0x%02X".format(session.disconnectPairedDevice(rest.removeFirst())))
+        "unpair" -> println("Résultat 0x%02X".format(session.unpairDevice(rest.removeFirst())))
+        "switch" -> println("Résultat 0x%02X".format(session.switchSource(rest.removeFirst())))
         "devices" -> {
             val info = session.readPairedDevices()
             println("Mode d'appairage : ${info.pairingMode}")
