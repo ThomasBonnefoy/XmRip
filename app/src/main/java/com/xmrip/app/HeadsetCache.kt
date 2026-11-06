@@ -19,6 +19,8 @@ object HeadsetCache {
     data class Snapshot(
         val name: String?,
         val firmware: String?,
+        /** `MdrConstants.MODEL_COLOR_*` ou null si le casque ne l'a jamais annoncée. */
+        val color: Int?,
         val battery: Int?,
         val charging: Boolean,
         /** MdrSession.MODE_* ou null si jamais lu. */
@@ -33,6 +35,7 @@ object HeadsetCache {
         return Snapshot(
             name = p.getString("name", null),
             firmware = p.getString("firmware", null),
+            color = p.getInt("color", -1).takeIf { it >= 0 },
             battery = p.getInt("battery", -1).takeIf { it >= 0 },
             charging = p.getBoolean("charging", false),
             mode = p.getInt("mode", -1).takeIf { it >= 0 },
@@ -55,13 +58,14 @@ object HeadsetCache {
         val e = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
         if (name != null) e.putString("name", name)
         report.firmwareVersion?.let { e.putString("firmware", it) }
+        report.modelColor?.let { e.putInt("color", it) }
         e.putInt("battery", report.levelPercent)
         e.putBoolean("charging", report.chargingStatus == MdrConstants.CHARGING_CHARGING)
         e.putLong("at", System.currentTimeMillis())
         report.ncAsm?.let { putMode(e, it) }
         e.apply()
         val after = load(context)
-        if (after.copy(at = 0, firmware = null) != before.copy(at = 0, firmware = null)) notifySurfaces(context)
+        if (after.copy(at = 0, firmware = null, color = null) != before.copy(at = 0, firmware = null, color = null)) notifySurfaces(context)
     }
 
     fun saveMode(context: Context, nc: NcAsmState) {

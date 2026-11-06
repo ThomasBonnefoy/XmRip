@@ -349,14 +349,16 @@ object HeadphoneClient {
     /** Modèle et firmware du casque, gardés d'une connexion à l'autre : ils ne se redemandent pas (2 échanges). */
     private var knownModel: String? = null
     private var knownFirmware: String? = null
+    private var knownColor: Int? = null
 
     private fun ensureHandshake(session: MdrSession, full: Boolean) {
         if (full) {
             if (session.report == null) {
-                session.seedDeviceInfo(knownModel, knownFirmware)
+                session.seedDeviceInfo(knownModel, knownFirmware, knownColor)
                 session.handshakeAndBattery()
                 knownModel = session.modelName ?: knownModel
                 knownFirmware = session.firmwareVersion ?: knownFirmware
+                knownColor = session.modelColor ?: knownColor
             }
         } else if (!session.handshaken) {
             session.quickHandshake(System.currentTimeMillis() + MdrConstants.HANDSHAKE_TIMEOUT_MS)

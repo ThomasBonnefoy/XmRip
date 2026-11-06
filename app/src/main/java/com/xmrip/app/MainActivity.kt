@@ -3,6 +3,7 @@ package com.xmrip.app
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -26,6 +27,7 @@ import com.xmrip.app.HeadsetController.Part
 import com.xmrip.app.protocol.MdrSession
 import com.xmrip.app.ui.Appearance
 import com.xmrip.app.ui.Colors
+import com.xmrip.app.ui.HeroArt
 import com.xmrip.app.ui.DevicesPage
 import com.xmrip.app.ui.PagerFrame
 import com.xmrip.app.ui.GlowDrawable
@@ -47,6 +49,7 @@ class MainActivity : Activity() {
         private const val REQ_BLUETOOTH_CONNECT = 1001
         private const val ACTION_SET_NC_ASM = "com.xmrip.app.action.SET_NC_ASM"
         private const val EXTRA_NC_ASM_MODE = "com.xmrip.app.extra.NC_ASM_MODE"
+        private const val EXTRA_DEBUG_COLOR = "debug_color"
         private const val STATE_TAB = "tab"
         private const val SCRIM_DP = 118
     }
@@ -78,6 +81,9 @@ class MainActivity : Activity() {
         Colors.apply(light)
         setTheme(if (light) R.style.Theme_XmRip_Light else R.style.Theme_XmRip_Dark)
         super.onCreate(savedInstanceState)
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            HeroArt.forcedColor = intent.getIntExtra(EXTRA_DEBUG_COLOR, -1).takeIf { it >= 0 }
+        }
         ui = Ui(this)
         ctrl = HeadsetController(this)
         ctrl.onMessage = { text, error -> showMessage(text, error) }
