@@ -31,6 +31,11 @@ priorité qualité / connexion), **Appareils** (mode appairage, liste multipoint
 **Réglages** (Speak-to-Chat et délai de reprise, guidage vocal et son volume, bouton de bruit, extinction automatique,
 éteindre le casque, journal). L'état affiché est celui d'après chaque action.
 
+L'accueil et l'en-tête montrent la photo du casque à sa couleur, comme l'app Android : le moteur lit la couleur annoncée
+par le casque et l'API la renvoie (`color`, `look`), avec la même table (`HeadsetLook.kt`) ; les six photos de
+`app/src/main/res/drawable-nodpi/` sont copiées dans l'app par `build.sh`. La dernière couleur connue est gardée d'un
+lancement à l'autre. L'anneau autour de la photo donne la batterie (violet, orange sous 30 %, rouge sous 15 %, vert en charge).
+
 Ne sont pas repris, car propres au téléphone : lecture des notifications, coupure du son quand le PC est connecté, actions
 des gestes, tuile, widget, raccourcis, thème, titre en cours de lecture.
 
@@ -67,6 +72,22 @@ Dans un autre terminal : `tools/xm.sh battery`, `tools/xm.sh nc ambient 10 off`,
   `run.sh --reconnect` force cette réinitialisation au démarrage.
 - Le résultat de `guide` est écrit dans `~/Library/Caches/xmrip-bridge/guide.txt`.
 - `gradlew` doit avoir des fins de ligne LF (un `gradlew` en CRLF, par exemple après une synchro, échoue avec `bad interpreter`).
+
+## Sans casque : le faux casque
+
+Le faux casque des tests (`desktop/src/test/…/FakeHeadset.kt`) peut remplacer le pont, par exemple casque éteint ou pour
+voir une autre couleur que celle du sien :
+
+```sh
+./gradlew -Dorg.gradle.configureondemand=true :desktop:runFakeHeadset --args="--port 9877 --color 5"   # 5 = bleu
+tools/xm.sh --port 9877 battery nc ambient 12
+./gradlew -Dorg.gradle.configureondemand=true :desktop:runWeb --args="--port 8765 --bridge-port 9877"  # puis ouvrir l'app
+```
+
+Il rejoue les réponses relevées sur un WH-1000XM6 (firmware 3.1.5, batterie 64 %, volume 4) pour le handshake, et confirme
+toute écriture (bruit, ambiant, volume…) en la renvoyant en notification. Les lectures de réglages, d'égaliseur et
+d'appareils n'ont pas de réponse et expirent, donc « Actualiser » échoue dans l'app ; changer de mode fonctionne. L'app
+lancée pendant que ce moteur tourne le réutilise au lieu de lancer le sien.
 
 ## Utilisation (Windows)
 

@@ -1,5 +1,6 @@
 package com.xmrip.desktop
 
+import com.xmrip.app.protocol.HeadsetLook
 import com.xmrip.app.protocol.MdrConstants
 import com.xmrip.app.protocol.MdrSession
 import java.io.FileDescriptor
@@ -87,7 +88,8 @@ fun main(args: Array<String>) {
                 } else {
                     println(session.handshakeAndBattery().let { r ->
                         "${r.modelName} fw ${r.firmwareVersion} | batterie ${r.levelPercent}% (${r.chargingLabel}) | " +
-                            "NC/ASM: ${r.ncAsm?.label} | volume ${r.musicVolume}"
+                            "NC/ASM: ${r.ncAsm?.label} | volume ${r.musicVolume} | " +
+                            "couleur ${r.modelColor ?: "?"} (photo ${HeadsetLook.of(r.modelColor).name.lowercase()})"
                     })
                     println("[handshake complet : ${ms()} ms]")
                 }

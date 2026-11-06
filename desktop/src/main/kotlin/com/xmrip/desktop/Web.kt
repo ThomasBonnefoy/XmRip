@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import com.xmrip.app.protocol.BatteryReport
 import com.xmrip.app.protocol.EqState
+import com.xmrip.app.protocol.HeadsetLook
 import com.xmrip.app.protocol.MdrConstants
 import com.xmrip.app.protocol.MdrSession
 import com.xmrip.app.protocol.PairedDevicesInfo
@@ -19,8 +20,8 @@ import kotlin.system.exitProcess
 
 /**
  * Serveur local du banc de test pour l'app macOS (tools/mac-app) : le même `MdrSession` que la ligne de commande, derrière
- * une petite API HTTP en JSON. Une connexion + handshake par requête, comme `xm.sh` ; les requêtes sont traitées une par une
- * (une seule session MDR à la fois). Écoute uniquement sur 127.0.0.1.
+ * une petite API HTTP en JSON. La session MDR est gardée ouverte entre deux requêtes (voir [Held]) ; les requêtes sont
+ * traitées une par une (une seule session MDR à la fois). Écoute uniquement sur 127.0.0.1.
  *
  *   GET  /ping  -> « ok »
  *   POST /api   -> corps = commandes (« ambient 10 », « battery eq »…) ; réponse JSON {ok, error, output, state}
@@ -56,6 +57,14 @@ private class Held(val socket: Socket, val session: MdrSession) {
 }
 
 private var held: Held? = null
+
+/**
+ * Modèle, firmware et couleur, gardés d'une session à l'autre comme dans HeadphoneClient (Android) : après une session
+ * rendue, le handshake suivant ne les redemande pas (3 échanges, jusqu'à 1,5 s de plus si le casque tait sa couleur).
+ */
+private var knownModel: String? = null
+private var knownFirmware: String? = null
+private var knownColor: Int? = null
 
 private fun dropHeld() {
     held?.close()
@@ -103,12 +112,16 @@ private fun obtainSession(host: String, bridgePort: Int): Pair<Held, BatteryRepo
     }
     val socket = Socket().apply { connect(InetSocketAddress(host, bridgePort), 3_000) }
     val session = MdrSession(socket.getInputStream(), socket.getOutputStream())
+    session.seedDeviceInfo(knownModel, knownFirmware, knownColor)
     val first = try {
         session.handshakeAndBattery()
     } catch (e: Exception) {
         runCatching { socket.close() }
         throw e
     }
+    knownModel = session.modelName ?: knownModel
+    knownFirmware = session.firmwareVersion ?: knownFirmware
+    knownColor = session.modelColor ?: knownColor
     return Held(socket, session).also { held = it } to first
 }
 
@@ -227,7 +240,9 @@ private fun stateJson(r: BatteryReport?): String {
         "\"battery\":${r.levelPercent},\"charging\":${jsonString(r.chargingLabel)}," +
         "\"ncKind\":${jsonString(kind)},\"ncLabel\":${jsonString(nc?.label)},\"ambient\":${nc?.ambientLevel ?: "null"}," +
         "\"autoAmbient\":${jb(nc?.autoEnabled)}," +
-        "\"volume\":${r.musicVolume ?: "null"}}"
+        "\"volume\":${r.musicVolume ?: "null"}," +
+        // Photo à afficher (même table que l'app Android) ; null tant que le casque n'a pas annoncé sa couleur.
+        "\"color\":${ji(r.modelColor)},\"look\":${jsonString(r.modelColor?.let { HeadsetLook.of(it).name.lowercase() })}}"
 }
 
 private fun toJson(o: Outcome) =
