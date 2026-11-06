@@ -19,7 +19,7 @@ Thème clair ou sombre (Réglages → Apparence, par défaut comme le téléphon
 
 Hors de l'app : **tuile des réglages rapides** (mode et batterie, appui = mode suivant), **widget** d'écran d'accueil (batterie, mode, trois boutons) et trois **raccourcis** sur l'icône. Ils ne tentent rien si le casque n'est pas connecté au téléphone. Les raccourcis sont publiés par le code (`Shortcuts.kt`) et non par le manifeste : Android lance ceux du manifeste avec `FLAG_ACTIVITY_TASK_ON_HOME`, et une routine Samsung qui les déclenchait renvoyait à l'écran d'accueil.
 
-Les commandes passent dans une file (aucune action perdue) et l'écran affiche l'état attendu tout de suite, corrigé par la réponse du casque. L'illustration du casque est dessinée : les visuels de Sony sont protégés.
+Les commandes passent dans une file (aucune action perdue) et l'écran affiche l'état attendu tout de suite, corrigé par la réponse du casque. La photo du casque en tête de l'accueil est `app/src/main/res/drawable-nodpi/headphones_*.webp` (une photo par couleur, choisie d'après la couleur annoncée par le casque ; photos produit Sony, à remplacer avant toute diffusion publique).
 
 ## Source de vérité du protocole
 
@@ -40,7 +40,16 @@ Autres ressources utiles :
 - **WH-1000XM6 uniquement.** L'UI affiche un avertissement si un autre modèle est détecté.
 - Un seul contrôleur à la fois : si Sony Sound Connect contrôle le casque, la connexion échoue.
 
+## Installation
+
+Télécharger l'APK de la [dernière release](https://github.com/ThomasBonnefoy/XmRip/releases/latest) (`XmRip-0.3.0.apk`), l'installer sur le téléphone (sources inconnues autorisées), puis appairer le casque dans les réglages Bluetooth d'Android avant d'ouvrir l'app.
+
+- Les APK des releases sont **signés avec une clé de debug**, pas avec la clé de la v0.1.0 : si une v0.1.0 est déjà installée, la désinstaller d'abord (la mise à jour est refusée).
+- Permissions demandées : Bluetooth (`BLUETOOTH_CONNECT`), notifications, et, selon les fonctions utilisées, « Accès aux notifications » (pochette, titre, lecture à voix haute) et « Afficher par-dessus les autres applis » (geste qui ouvre une application).
+
 ## Build (APK debug)
+
+Prérequis : JDK 17 ou plus récent (celui d'Android Studio convient) et Android SDK, avec `ANDROID_HOME` pointant dessus.
 
 ```
 .\gradlew.bat assembleDebug
@@ -56,6 +65,18 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 - `compileSdk`/`targetSdk` : 37, `minSdk` : 24, jvmTarget 17.
 - Aucune dépendance externe (`android.useAndroidX=true`).
+- Signature release : si `keystore.properties` (ignoré par git) est présent à la racine, `assembleRelease` signe avec la clé qu'il désigne ; sinon l'APK n'est pas signé avec une clé de release.
+
+## Structure du dépôt
+
+| Dossier | Contenu |
+|---|---|
+| `app/` | L'app Android : `protocol/` (trames et session MDR, sans Android), `bt/` (liaison RFCOMM), `HeadsetController` (file de commandes et état), `ui/` (thème, vues dessinées, quatre pages), plus tuile, widget, raccourcis et surveillances en arrière-plan |
+| `reference/` | Copie statique de libmdr et documentation du protocole (voir plus haut) |
+| `desktop/`, `tools/pc-bridge/` | Banc de test PC (voir plus bas) |
+| `pc-app/` | Appli Windows de test (voir plus bas) |
+
+Historique : branches de fonctionnalité fusionnées dans `main` sans avance rapide, tags `v0.1.0`, `v0.2.0`, `v0.3.0`.
 
 ## État des features
 
@@ -87,11 +108,20 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 | Tuile des réglages rapides, widget d'écran d'accueil, journal des échanges | installés, à valider sur le téléphone |
 | Pression sonore (table 2 `5A`) | non branchée : réponses incohérentes (`00` « hors plage ») |
 
-La vérification se fait sur le casque réel — aucune suite de tests automatisés pour l'instant.
+La vérification se fait surtout sur le casque réel. Quelques tests tournent sans casque, contre un faux casque qui rejoue des réponses relevées sur le XM6 (`desktop/src/test/`) : `./gradlew :desktop:test -Dorg.gradle.configureondemand=true`.
+
+## Limites connues
+
+- Le casque n'accepte qu'**une seule session de contrôle** : tant que l'app garde la liaison ouverte (action de geste choisie, lecture de la liste des appareils toutes les 30 s), ni Sony Sound Connect ni l'appli Windows de test ne peuvent s'y connecter.
+- Aucune commande trouvée pour la zone tactile de droite : le casque annonce les gestes, mais leurs réglages ne passent pas par MDR.
+- La sensibilité de Speak-to-Chat ne s'écrit pas de façon fiable : elle est affichée, pas réglable.
+- Les textes de l'interface sont écrits en français dans le code (pas de traduction), et l'orientation paysage et les grands écrans ne sont pas traités.
+- Les fonctions marquées « à valider sur le téléphone » dans le tableau ci-dessus ont été essayées par adb, pas encore en usage réel.
 
 ## Outils de test sur PC
 
-- **Banc de test** (`tools/pc-bridge/`, module `desktop/`, `tools/xm.ps1`) : rejoue le code du protocole de l'app sur le vrai casque depuis Windows, sans téléphone ni APK (pont RFCOMM vers `127.0.0.1:9876`). Mode d'emploi : [`tools/pc-bridge/README.md`](tools/pc-bridge/README.md).
+- **Banc de test** (`tools/pc-bridge/`, module `desktop/`, `tools/xm.ps1` sous Windows, `tools/xm.sh` sous macOS) : rejoue le code du protocole de l'app sur le vrai casque depuis l'ordinateur, sans téléphone ni APK (pont RFCOMM vers `127.0.0.1:9876`). Mode d'emploi : [`tools/pc-bridge/README.md`](tools/pc-bridge/README.md).
+- **App macOS « XmRip Banc »** (`tools/mac-app/`, SwiftUI) : les réglages du casque en quatre onglets, pilotés par le même code Kotlin que l'app (`:desktop:runWeb`). Mode d'emploi : [`tools/pc-bridge/README.md`](tools/pc-bridge/README.md).
 - **Appli Windows de test** (`pc-app/`, WinForms .NET 10, un seul `.exe` autonome) : les réglages de l'app et un onglet Gestes, avec le protocole porté en C#. Sert à essayer une nouveauté sur le casque avant de la porter sur Android. Mode d'emploi : [`pc-app/README.md`](pc-app/README.md).
 - Le casque n'accepte qu'une session de contrôle à la fois : fermer l'app du téléphone (ou couper ses actions de gestes) pendant les essais.
 
