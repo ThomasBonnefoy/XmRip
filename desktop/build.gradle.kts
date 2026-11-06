@@ -29,3 +29,10 @@ application {
 tasks.named<JavaExec>("run") {
     standardInput = System.`in`
 }
+
+
+// Interface web minimale (app macOS, tools/mac-app) : boutons qui lancent les mêmes commandes que `:desktop:run`.
+tasks.register<JavaExec>("runWeb") {
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "com.xmrip.desktop.WebKt"
+}
